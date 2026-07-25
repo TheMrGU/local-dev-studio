@@ -718,6 +718,20 @@ window.snap.on('review:exported', ({ project, folder }) => {
   });
 });
 
+window.snap.on('review:promote', ({ candidates }) => {
+  for (const candidate of candidates) {
+    toast(`You've said this in ${candidate.count} reviews: “${candidate.text.slice(0, 90)}”`, {
+      timeout: 20000,
+      action: {
+        label: 'Make it standing',
+        fn: () => invoke('calibration:promote', { text: candidate.text })
+          .then(() => toast('Added to standing preferences — ships with every export', { kind: 'ok' }))
+          .catch(failed),
+      },
+    });
+  }
+});
+
 /* ---------- palette ---------- */
 async function openPalette(site) {
   state.paletteDir = site.dir;

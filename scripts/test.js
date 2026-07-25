@@ -867,6 +867,67 @@ async function reviewExportTests() {
   });
 }
 
+/* ---------------- resolve loop ---------------- */
+async function resolveLoopTests() {
+  console.log('\nresolve loop');
+
+  const PRJ = 'prj_resolve1';
+
+  await check('orphan flag round-trips and never deletes the note', () => {
+    const annotation = reviewsStore.addAnnotation(PRJ, {
+      scope: 'element', context: { selector: '.gone' },
+      input: { rating: 4, severity: 'should-fix', why: 'This element was misaligned badly.' },
+    });
+    const orphaned = reviewsStore.updateAnnotation(PRJ, annotation.id, { orphaned: true });
+    eq(orphaned.orphaned, true);
+    ok(reviewsStore.getAnnotation(PRJ, annotation.id), 'still stored');
+    const back = reviewsStore.updateAnnotation(PRJ, annotation.id, { orphaned: false });
+    eq(back.orphaned, false, 'element came back: ');
+  });
+
+  await check('a resolved annotation becomes a calibration anchor with the diff', () => {
+    const annotation = reviewsStore.addAnnotation(PRJ, {
+      scope: 'element', context: { selector: 'h1' },
+      input: { rating: 3, severity: 'blocking', axes: ['typography'], why: 'Way too light for a headline.', want: 'Söhne-weight authority.' },
+    });
+    reviewsStore.updateAnnotation(PRJ, annotation.id, { resolved: true, resolvedRating: 9 });
+    const before = calibrationStore.load().anchors.length;
+    calibrationStore.anchorFromAnnotation('clientsite', reviewsStore.getAnnotation(PRJ, annotation.id));
+    const anchors = calibrationStore.load().anchors;
+    eq(anchors.length, before + 1);
+    const anchor = anchors[anchors.length - 1];
+    eq(anchor.rating, 9, 'anchors the AFTER rating: ');
+    eq(anchor.axis, 'typography');
+    ok(anchor.note.includes('3 → 9'), 'note records the journey: ' + anchor.note);
+  });
+
+  await check('complaints heard in 3+ reviews become promotion candidates', () => {
+    const say = why => reviewsStore.addAnnotation(PRJ, {
+      scope: 'global', context: {}, input: { axes: ['layout'], why },
+    });
+    say('Buttons are far too round everywhere on this site.');
+    reviewsStore.markExported(PRJ, reviewsStore.activeReview(PRJ).id, 'x');
+    say('Still every button is too round across the pages.');
+    eq(reviewsStore.recurringGlobals(PRJ).length, 0, 'two reviews is not a pattern: ');
+    reviewsStore.markExported(PRJ, reviewsStore.activeReview(PRJ).id, 'x');
+    say('Round buttons again — cap the radius sitewide please.');
+    const candidates = reviewsStore.recurringGlobals(PRJ);
+    eq(candidates.length, 1);
+    eq(candidates[0].count, 3);
+    ok(candidates[0].text.includes('Round buttons again'), 'latest phrasing wins: ' + candidates[0].text);
+  });
+
+  await check('review history counts resolved notes per session', () => {
+    const history = reviewsStore.listReviews(PRJ);
+    ok(history.length >= 3, 'three sessions exist');
+    const annotations = reviewsStore.listAnnotations(PRJ);
+    const firstReview = history[0];
+    const inFirst = annotations.filter(a => a.reviewId === firstReview.id);
+    const resolvedInFirst = inFirst.filter(a => a.resolved);
+    eq(resolvedInFirst.length, 1, 'one resolved in first session: ');
+  });
+}
+
 /* ---------------- review API over http ---------------- */
 async function reviewApiTests() {
   console.log('\nreview api');
@@ -876,11 +937,13 @@ async function reviewApiTests() {
     '<html><body><h1 class="hero">Review me</h1></body></html>');
   const project = projectsReg.addLocal(site);
 
+  const anchored = [];
   const manager = new ReviewManager({
     projects: projectsReg,
     capturesRoot: () => scratch('rev-api-caps'),
     exportReview,
     overlayPath: path.join(ROOT, 'renderer', 'review-overlay.js'),
+    onAnchor: (proj, annotation) => anchored.push(annotation.id),
   });
   const hostMgr = new HostManager();
   hostMgr.reviewRouter = dir => manager.forDir(dir);
@@ -959,6 +1022,19 @@ async function reviewApiTests() {
       ok(fs.existsSync(path.join(res.json.folder, 'REVIEW.md')), 'REVIEW.md exists');
     });
 
+    await check('resolve over http re-rates and can request an anchor', async () => {
+      const state = await request('GET', '/__sitesnap__/review/state');
+      const target = state.json.annotations[0];
+      const res = await request('POST', '/__sitesnap__/review/resolve', {
+        id: target.id, resolvedRating: 8, asAnchor: true,
+      });
+      eq(res.status, 200);
+      eq(res.json.annotation.resolved, true);
+      eq(res.json.annotation.resolvedRating, 8);
+      eq(res.json.annotation.input.rating, 4, 'original rating kept for the diff: ');
+      eq(anchored, [target.id], 'onAnchor fired: ');
+    });
+
     await check('done turns the api off; the page serves clean again', async () => {
       const res = await request('POST', '/__sitesnap__/review/done');
       eq(res.status, 200);
@@ -1035,6 +1111,7 @@ async function miscTests() {
   await liveReloadTests();
   await reviewStoreTests();
   await reviewExportTests();
+  await resolveLoopTests();
   await reviewApiTests();
   await miscTests();
 

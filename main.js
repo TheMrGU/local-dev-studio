@@ -42,7 +42,25 @@ const reviewManager = new ReviewManager({
   onExported: (project, result) => {
     log.info('review exported', project.name, result.folder);
     send('review:exported', { project: project.name, folder: result.folder });
+    // Complaints heard in 3+ reviews are offered for promotion to a standing
+    // preference — the user decides, we only notice the repetition.
+    const already = calibration.load().standingPreferences.map(p => p.toLowerCase());
+    const candidates = reviews.recurringGlobals(project.id)
+      .filter(c => !already.includes(c.text.toLowerCase()))
+      .slice(0, 3);
+    if (candidates.length) send('review:promote', { candidates });
     send('ui:refresh');
+  },
+  onAnchor: (project, annotation) => {
+    try {
+      const shot = annotation.context.screenshotElement
+        ? path.join(reviews.shotsDir(project.id), path.basename(annotation.context.screenshotElement))
+        : null;
+      calibration.anchorFromAnnotation(project.name, annotation, shot);
+      log.info('calibration anchor added', annotation.id);
+    } catch (err) {
+      log.warn('anchor failed', annotation.id, err.message);
+    }
   },
   onReveal: folder => shell.openPath(folder),
   onReferenceHost: async (target, pick) => {

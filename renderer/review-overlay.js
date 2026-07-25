@@ -194,6 +194,16 @@
     .proj .kind { color: #86868b; font-size: 11px; margin-left: 6px; }
     .banner { position: fixed; top: 0; left: 0; right: 0; z-index: 2147483646; background: ${ACCENT}; color: #fff;
           font-size: 13px; font-weight: 600; text-align: center; padding: 9px; }
+    .pin { position: fixed; z-index: 2147483645; width: 21px; height: 21px; border-radius: 50%;
+          background: ${ACCENT}; color: #fff; font-size: 10.5px; font-weight: 700; border: 2px solid #fff;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.35); cursor: pointer; padding: 0; line-height: 17px; text-align: center; }
+    .pin.resolved { background: #23a55a; }
+    .pin-why { font-size: 12.5px; margin: 8px 0 0; }
+    .pin-want { font-size: 12.5px; margin: 4px 0 0; color: #6e6e73; }
+    .pin-res { font-size: 12.5px; font-weight: 650; color: #23a55a; margin: 8px 0 0; }
+    .anchor-row { display: flex; gap: 7px; align-items: center; font-size: 12px; margin-top: 10px; cursor: pointer; }
+    .orphan-row { display: flex; justify-content: space-between; gap: 8px; align-items: center;
+          padding: 8px 0; border-bottom: 1px solid #e5e5ea; font-size: 12.5px; }
   </style>`;
 
   const el = (tag, cls, text) => {
@@ -234,8 +244,8 @@
       selBoxes.push(box);
     }
   }
-  window.addEventListener('scroll', () => requestAnimationFrame(redrawSelection), { passive: true, capture: true });
-  window.addEventListener('resize', () => requestAnimationFrame(redrawSelection), { passive: true });
+  window.addEventListener('scroll', () => requestAnimationFrame(() => { redrawSelection(); renderPins(); }), { passive: true, capture: true });
+  window.addEventListener('resize', () => requestAnimationFrame(() => { redrawSelection(); renderPins(); }), { passive: true });
 
   function clearSelection() {
     state.selected = [];
@@ -456,6 +466,172 @@
     } catch (e) { toast(e.message); }
   }
 
+  /* ---------- pins: the resolve loop ---------- */
+  const pinEls = [];
+  let pinPop = null;
+
+  function annotationsForPage() {
+    if (!state.config) return [];
+    const here = location.pathname + location.search;
+    return state.config.annotations.filter(a =>
+      (a.scope === 'element' || a.scope === 'region')
+      && (a.context.pageUrl || '/') === here);
+  }
+
+  function locate(annotation) {
+    for (const sel of [annotation.context.selector, annotation.context.selectorFallback]) {
+      if (!sel) continue;
+      try {
+        const target = document.querySelector(sel);
+        if (target) return target;
+      } catch { /* selector list with commas can be invalid after edits */ }
+    }
+    return null;
+  }
+
+  function renderPins() {
+    for (const pin of pinEls.splice(0)) pin.remove();
+    const list = annotationsForPage();
+    list.forEach((annotation, index) => {
+      let x, y;
+      if (annotation.scope === 'region' && annotation.context.boundingBox) {
+        const b = annotation.context.boundingBox;
+        x = b.x - window.scrollX + b.w;
+        y = b.y - window.scrollY;
+      } else {
+        const target = locate(annotation);
+        if (!target) return; // orphaned — lives in the toolbar list instead
+        const r = target.getBoundingClientRect();
+        x = r.right;
+        y = r.top;
+      }
+      const pin = el('button', 'pin' + (annotation.resolved ? ' resolved' : ''),
+        annotation.resolved ? '✓' : String(index + 1));
+      pin.title = (annotation.input.why || '').slice(0, 120);
+      Object.assign(pin.style, { left: Math.round(x - 10) + 'px', top: Math.round(y - 10) + 'px' });
+      pin.addEventListener('click', () => openPinPopup(annotation));
+      root.appendChild(pin);
+      pinEls.push(pin);
+    });
+  }
+
+  function closePinPop() {
+    if (pinPop) { pinPop.remove(); pinPop = null; }
+  }
+
+  function openPinPopup(annotation) {
+    closePinPop();
+    pinPop = el('div', 'panel');
+    const head = `${annotation.input.severity}`
+      + (annotation.input.rating ? ` · ${annotation.input.rating}/10` : '')
+      + (annotation.input.axes.length ? ` · ${annotation.input.axes.join(', ')}` : '');
+    pinPop.appendChild(el('h3', '', head));
+    if (annotation.context.selector) pinPop.appendChild(el('div', 'sel-label', annotation.context.selector));
+    if (annotation.input.why) pinPop.appendChild(el('p', 'pin-why', annotation.input.why));
+    if (annotation.input.want) pinPop.appendChild(el('p', 'pin-want', '→ ' + annotation.input.want));
+
+    const actions = el('div', 'actions');
+    if (annotation.resolved) {
+      pinPop.appendChild(el('p', 'pin-res', 'Resolved'
+        + (annotation.resolvedRating && annotation.input.rating
+          ? ` — ${annotation.input.rating} → ${annotation.resolvedRating}` : '')));
+    } else {
+      pinPop.appendChild(el('div', 'lbl', 'Mark resolved — how is it now?'));
+      const row = el('div', 'row');
+      let newRating = null;
+      for (let i = 1; i <= 10; i++) {
+        const b = el('button', 'rate', String(i));
+        b.addEventListener('click', () => {
+          newRating = i;
+          row.querySelectorAll('.rate').forEach((x, idx) => x.classList.toggle('on', idx + 1 === i));
+        });
+        row.appendChild(b);
+      }
+      pinPop.appendChild(row);
+      const anchorLabel = el('label', 'anchor-row');
+      const anchorBox = document.createElement('input');
+      anchorBox.type = 'checkbox';
+      anchorLabel.appendChild(anchorBox);
+      anchorLabel.appendChild(el('span', '', 'Save the after as a calibration anchor'));
+      pinPop.appendChild(anchorLabel);
+
+      const resolveBtn = el('button', 'save', 'Resolve');
+      resolveBtn.addEventListener('click', async () => {
+        try {
+          await api.post('resolve', { id: annotation.id, resolvedRating: newRating, asAnchor: anchorBox.checked });
+          await refreshState();
+          closePinPop();
+          renderPins();
+          toast(newRating && annotation.input.rating
+            ? `Resolved — ${annotation.input.rating} → ${newRating}` : 'Resolved');
+        } catch (e) { toast(e.message); }
+      });
+      actions.appendChild(resolveBtn);
+    }
+    const del = el('button', 'ghost', 'Delete');
+    del.addEventListener('click', async () => {
+      await api.post('delete', { id: annotation.id }).catch(() => {});
+      await refreshState();
+      closePinPop();
+      renderPins();
+    });
+    actions.appendChild(del);
+    const close = el('button', 'ghost', 'Close');
+    close.addEventListener('click', closePinPop);
+    actions.appendChild(close);
+    pinPop.appendChild(actions);
+
+    const box = annotation.context.boundingBox;
+    const anchor = box
+      ? { x: box.x - window.scrollX, y: box.y - window.scrollY, w: box.w }
+      : { x: window.innerWidth / 2 - 165, y: 120, w: 0 };
+    pinPop.style.left = Math.max(10, Math.min(anchor.x + anchor.w + 14, window.innerWidth - 344)) + 'px';
+    pinPop.style.top = Math.max(10, Math.min(anchor.y, window.innerHeight - 380)) + 'px';
+    root.appendChild(pinPop);
+  }
+
+  /** After code changes, selectors may die. Flag those annotations as orphaned
+   *  (never delete) and un-flag ones whose element came back. */
+  async function reconcileOrphans() {
+    let changed = false;
+    for (const annotation of annotationsForPage()) {
+      if (annotation.scope !== 'element') continue;
+      const found = !!locate(annotation);
+      if (found === !annotation.orphaned) continue;
+      changed = true;
+      await api.post('update', { id: annotation.id, patch: { orphaned: !found } }).catch(() => {});
+    }
+    if (changed) await refreshState().catch(() => {});
+  }
+
+  function showOrphans() {
+    const orphans = state.config.annotations.filter(a => a.orphaned && !a.resolved);
+    const modal = el('div', 'modal');
+    const card = el('div', 'modal-card');
+    card.appendChild(el('h3', '', 'Orphaned annotations'));
+    card.appendChild(el('p', 'pin-want',
+      'Their elements no longer exist — the note is kept, the pin has nowhere to sit.'));
+    for (const annotation of orphans) {
+      const row = el('div', 'orphan-row');
+      const label = el('span', '', `${annotation.context.selector || annotation.scope} — ${(annotation.input.why || '').slice(0, 70)}`);
+      row.appendChild(label);
+      const del = el('button', 'ghost', 'Delete');
+      del.addEventListener('click', async () => {
+        await api.post('delete', { id: annotation.id }).catch(() => {});
+        await refreshState();
+        row.remove();
+      });
+      row.appendChild(del);
+      card.appendChild(row);
+    }
+    const close = el('button', 'ghost', 'Close');
+    close.addEventListener('click', () => modal.remove());
+    card.appendChild(close);
+    modal.appendChild(card);
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    root.appendChild(modal);
+  }
+
   /* ---------- toolbar ---------- */
   const bar = el('div', 'bar');
   const countLabel = () => {
@@ -498,6 +674,15 @@
     const count = el('span', 'count', countLabel());
     count.id = 'ss-count';
     bar.appendChild(count);
+
+    const orphaned = state.config
+      ? state.config.annotations.filter(a => a.orphaned && !a.resolved).length : 0;
+    if (orphaned) {
+      const b = el('button', '', `${orphaned} orphaned`);
+      b.title = 'Annotations whose element no longer exists';
+      b.addEventListener('click', showOrphans);
+      bar.appendChild(b);
+    }
 
     const exportBtn = el('button', '', 'Export');
     exportBtn.addEventListener('click', doExport);
@@ -637,8 +822,7 @@
   /* ---------- boot ---------- */
   async function refreshState() {
     state.config = await api.get('state');
-    const count = bar.querySelector('#ss-count');
-    if (count) count.textContent = countLabel();
+    if (bar.isConnected) buildBar(); // counts and the orphan chip stay honest
     return state.config;
   }
 
@@ -652,6 +836,8 @@
     root.appendChild(bar);
     document.documentElement.appendChild(host);
     if (state.config.pick) enterPickMode();
+    await reconcileOrphans();
+    renderPins();
   }
 
   // Debug/automation surface — the acceptance test drives review through this.
@@ -675,6 +861,18 @@
     refresh: refreshState,
     goodSelector,
     fallbackSelector,
+    pins: () => pinEls.length,
+    openPin: id => {
+      const annotation = state.config.annotations.find(a => a.id === id);
+      if (!annotation) throw new Error('no annotation: ' + id);
+      openPinPopup(annotation);
+      return true;
+    },
+    resolve: (id, resolvedRating, asAnchor) =>
+      api.post('resolve', { id, resolvedRating, asAnchor })
+        .then(async r => { await refreshState(); renderPins(); return r; }),
+    renderPins,
+    reconcileOrphans,
   };
 
   if (document.readyState === 'loading') {
