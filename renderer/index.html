@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>SiteSnap</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.98 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.98a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09c0 .68.4 1.3 1.03 1.56a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9c.26.63.88 1.03 1.56 1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1.03Z"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></symbol>
+  <symbol id="i-zip" viewBox="0 0 24 24"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></symbol>
+  <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 22a10 10 0 1 1 10-10c0 1.66-1.34 3-3 3h-2.6a2.4 2.4 0 0 0-1.8 4 2.4 2.4 0 0 1-1.8 4Z"/><circle cx="7.5" cy="11.5" r="1.2"/><circle cx="12" cy="7.5" r="1.2"/><circle cx="16.5" cy="11.5" r="1.2"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14ZM10 11v6M14 11v6"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2Z"/><circle cx="12" cy="13" r="4"/></symbol>
+  <symbol id="i-film" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="2.2"/><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 7h5M17 17h5"/></symbol>
+  <symbol id="i-open" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/></symbol>
+  <symbol id="i-unpack" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8c0 .7.4 1.4 1 1.7l7 4a2 2 0 0 0 2 0l7-4c.6-.3 1-1 1-1.7ZM3.3 7 12 12l8.7-5M12 22V12"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M3 7v6h6M3.5 13a9 9 0 1 0 2.6-7.6L3 8.5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.3-4.3"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m20 6-11 11-5-5"/></symbol>
+  <symbol id="i-map" viewBox="0 0 24 24"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2Z"/><path d="M9 4v14M15 6v14"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="0.8"/><circle cx="12" cy="12" r="0.8"/><circle cx="19" cy="12" r="0.8"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></symbol>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4.1 13.2c-.4.5 0 1.3.7 1.3H11l-1.8 7.2c-.2.7.8 1.2 1.3.6L19.9 10c.4-.5 0-1.3-.7-1.3H13l1.8-6.1c.2-.7-.8-1.2-1.3-.6Z"/></svg>
+    <h1>SiteSnap</h1>
+    <span class="tagline">capture &middot; extract &middot; host</span>
+  </div>
+  <div class="topbar-right">
+    <button id="envStatus" class="env" title="Setup &amp; diagnostics"></button>
+    <button class="icon-btn" id="btnSettings" title="Settings (Ctrl+,)" aria-label="Settings"><svg><use href="#i-gear"/></svg></button>
+  </div>
+</header>
+
+<main>
+  <section class="capture-panel">
+    <form id="captureForm" autocomplete="off">
+      <div class="url-row">
+        <input id="url" type="text" placeholder="https://clientsite.com" spellcheck="false" required
+               aria-label="Website URL">
+        <button type="submit" id="btnCapture" class="primary">Capture site</button>
+      </div>
+      <div class="opts-row">
+        <input id="siteName" type="text" placeholder="name (optional)" spellcheck="false" aria-label="Folder name">
+        <label class="opt"><input type="checkbox" id="crawl" checked> Whole site</label>
+        <label class="opt">Depth
+          <select id="depth" aria-label="Crawl depth">
+            <option>1</option><option selected>2</option><option>3</option><option>4</option><option>5</option>
+          </select>
+        </label>
+        <label class="opt"><input type="checkbox" id="mobile"> Mobile</label>
+        <label class="opt"><input type="checkbox" id="fixVideos" checked> Fix videos</label>
+        <button type="button" id="btnAdvanced" class="link-btn">Advanced &#9662;</button>
+      </div>
+      <div id="advanced" class="opts-row advanced hidden">
+        <label class="opt"><input type="checkbox" id="stripBanners" checked> Strip cookie banners</label>
+        <label class="opt"><input type="checkbox" id="showBrowser"> Show browser (for sites that block bots)</label>
+        <label class="opt">Extra wait
+          <select id="waitDelay" aria-label="Extra wait before capture">
+            <option value="0">none</option>
+            <option value="1000">1s</option>
+            <option value="3000">3s</option>
+            <option value="6000">6s</option>
+          </select>
+        </label>
+      </div>
+    </form>
+
+    <div id="runPanel" class="run-panel hidden">
+      <div class="run-status">
+        <span class="spinner" id="runSpinner"></span>
+        <span id="runStatus">Starting…</span>
+        <span id="runElapsed" class="run-elapsed"></span>
+        <button id="btnCancel" class="small ghost">Cancel</button>
+      </div>
+      <pre id="runLog" tabindex="0"></pre>
+    </div>
+  </section>
+
+  <section id="serversStrip" class="servers hidden">
+    <span class="servers-label">Hosting</span>
+    <div id="serverChips"></div>
+    <button id="btnStopAll" class="small ghost">Stop all</button>
+  </section>
+
+  <section class="library">
+    <div class="lib-head">
+      <h2>Library</h2>
+      <div class="search">
+        <svg aria-hidden="true"><use href="#i-search"/></svg>
+        <input id="libSearch" type="text" placeholder="Filter…" spellcheck="false" aria-label="Filter captures">
+      </div>
+      <select id="libSort" aria-label="Sort captures">
+        <option value="recent">Newest</option>
+        <option value="name">Name</option>
+        <option value="size">Largest</option>
+      </select>
+      <label class="opt"><input type="checkbox" id="libShowRaw"> Raw snapshots</label>
+      <button class="icon-btn" id="btnRefresh" title="Refresh (F5)" aria-label="Refresh"><svg><use href="#i-refresh"/></svg></button>
+    </div>
+    <div id="libRoot" class="lib-root"></div>
+    <div id="grid" class="grid"></div>
+    <div id="empty" class="empty hidden"></div>
+  </section>
+</main>
+
+<aside id="paletteDrawer" class="drawer hidden" aria-label="Palette">
+  <div class="drawer-head">
+    <h3>Palette <span id="palSite"></span></h3>
+    <button class="icon-btn" id="palClose" title="Close" aria-label="Close">&times;</button>
+  </div>
+  <p class="drawer-hint">Pick a swatch, choose a replacement, apply. Rewrites every css, html and svg
+    file in the site — alpha and notation are preserved.</p>
+  <div id="swatches" class="swatches"></div>
+  <div id="palEdit" class="pal-edit hidden">
+    <div class="pal-pair">
+      <span id="palFromChip" class="chip-swatch"></span>
+      <span class="arrow">&rarr;</span>
+      <input type="color" id="palTo" aria-label="Replacement color">
+      <input type="text" id="palToHex" class="hex-input" spellcheck="false" aria-label="Replacement hex">
+    </div>
+    <div class="pal-actions">
+      <code id="palFromLabel"></code>
+      <button id="palApply" class="primary small">Apply</button>
+    </div>
+  </div>
+  <div id="palUndo" class="pal-undo hidden">
+    <h4>History</h4>
+    <div id="palUndoList"></div>
+  </div>
+</aside>
+
+<div id="settingsModal" class="modal hidden">
+  <div class="modal-card">
+    <h3>Settings</h3>
+    <label>Captures folder
+      <div class="row"><input id="setRoot" type="text" spellcheck="false"><button id="setBrowse" class="small">Browse</button></div>
+    </label>
+    <label>Browser used for capturing
+      <div class="row">
+        <select id="setBrowserPick"></select>
+        <button id="setBrowserBrowse" class="small">Browse</button>
+      </div>
+      <span id="setBrowserPath" class="mini path"></span>
+    </label>
+    <label>Default port for local hosting
+      <input id="setPort" type="number" min="1024" max="65535">
+    </label>
+    <label class="opt inline"><input type="checkbox" id="setOpenAfterHost"> Open the browser when I start hosting</label>
+    <details class="advanced-block">
+      <summary>Advanced</summary>
+      <label>Page-capture engine <span id="setSfStatus" class="mini"></span>
+        <input id="setSf" type="text" spellcheck="false" placeholder="bundled">
+        <span class="mini">Leave empty to use the copy that ships with SiteSnap.</span>
+      </label>
+    </details>
+    <div class="modal-actions">
+      <button id="setCancel" class="small">Cancel</button>
+      <button id="setSave" class="primary small">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="doctorModal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="doctorTitle">Setup &amp; diagnostics</h3>
+    <p id="doctorIntro" class="modal-hint"></p>
+    <ul id="doctorList" class="check-list"></ul>
+    <div class="modal-actions">
+      <button id="doctorLog" class="small">Open log</button>
+      <button id="doctorSettings" class="small">Settings</button>
+      <button id="doctorClose" class="primary small">Got it</button>
+    </div>
+  </div>
+</div>
+
+<div id="aboutModal" class="modal hidden">
+  <div class="modal-card about">
+    <svg class="mark big" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4.1 13.2c-.4.5 0 1.3.7 1.3H11l-1.8 7.2c-.2.7.8 1.2 1.3.6L19.9 10c.4-.5 0-1.3-.7-1.3H13l1.8-6.1c.2-.7-.8-1.2-1.3-.6Z"/></svg>
+    <h3>SiteSnap <span id="aboutVersion" class="mini"></span></h3>
+    <p class="modal-hint">Capture any website, extract it into editable files, host it locally.</p>
+    <dl id="aboutDetails" class="about-details"></dl>
+    <div class="modal-actions">
+      <button id="aboutNotices" class="small">Licenses</button>
+      <button id="aboutClose" class="primary small">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

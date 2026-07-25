@@ -1,0 +1,89 @@
+{
+  "name": "sitesnap",
+  "productName": "SiteSnap",
+  "version": "1.2.0",
+  "description": "Capture any website, extract it into editable files, and host it locally.",
+  "main": "main.js",
+  "author": {
+    "name": "NightShyft Studios"
+  },
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "lint": "eslint .",
+    "test": "eslint . && node scripts/test.js",
+    "smoke": "node scripts/smoke.js",
+    "dist": "electron-builder --win",
+    "dist:portable": "electron-builder --win portable",
+    "dist:installer": "electron-builder --win nsis",
+    "release": "npm test && npm run dist",
+    "e2e": "node scripts/e2e.js"
+  },
+  "dependencies": {
+    "single-file-cli": "^2.0.83"
+  },
+  "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "eslint": "^9.39.5"
+  },
+  "build": {
+    "appId": "com.nightshyft.sitesnap",
+    "productName": "SiteSnap",
+    "copyright": "Copyright © 2026 NightShyft Studios",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "lib/**/*",
+      "renderer/**/*",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      "LICENSE",
+      "THIRD-PARTY-NOTICES.md"
+    ],
+    "asarUnpack": [
+      "node_modules/single-file-cli/**",
+      "node_modules/simple-cdp/**",
+      "node_modules/ws/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SiteSnap",
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "uninstallDisplayName": "SiteSnap ${version}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}",
+      "unpackDirName": "SiteSnap"
+    },
+    "publish": null
+  }
+}
