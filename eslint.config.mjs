@@ -16,7 +16,9 @@ const BROWSER_GLOBALS = {
   window: 'readonly', document: 'readonly', navigator: 'readonly',
   console: 'readonly', setTimeout: 'readonly', clearTimeout: 'readonly',
   setInterval: 'readonly', clearInterval: 'readonly', Event: 'readonly',
-  URL: 'readonly', localStorage: 'readonly',
+  URL: 'readonly', localStorage: 'readonly', fetch: 'readonly',
+  location: 'readonly', getComputedStyle: 'readonly',
+  requestAnimationFrame: 'readonly', CSS: 'readonly',
 };
 
 export default [

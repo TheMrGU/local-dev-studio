@@ -29,6 +29,8 @@
   <symbol id="i-map" viewBox="0 0 24 24"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2Z"/><path d="M9 4v14M15 6v14"/></symbol>
   <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="0.8"/><circle cx="12" cy="12" r="0.8"/><circle cx="19" cy="12" r="0.8"/></symbol>
   <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></symbol>
+  <symbol id="i-note" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/><path d="M8 9h8M8 13h5"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 3v6h6"/><path d="M3.5 13a9 9 0 1 0 2.1-7.6L3 8"/><path d="M12 7v5l3 3"/></symbol>
 </svg>
 
 <header class="topbar">
@@ -181,6 +183,16 @@
       <button id="doctorLog" class="small">Open log</button>
       <button id="doctorSettings" class="small">Settings</button>
       <button id="doctorClose" class="primary small">Got it</button>
+    </div>
+  </div>
+</div>
+
+<div id="historyModal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="historyTitle">Review history</h3>
+    <div id="historyList" class="history-list"></div>
+    <div class="modal-actions">
+      <button id="historyClose" class="primary small">Close</button>
     </div>
   </div>
 </div>

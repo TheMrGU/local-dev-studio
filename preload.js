@@ -8,6 +8,7 @@ const INVOKE = new Set([
   'settings:get', 'settings:set', 'settings:browseRoot', 'settings:browseBrowser',
   'library:list',
   'project:addLocal', 'project:remove', 'project:setAutoStart', 'project:setLiveReload',
+  'review:start', 'review:stop', 'review:history', 'calibration:promote',
   'capture:start', 'capture:cancel',
   'extract:run',
   'host:start', 'host:stop', 'host:stopAll',
@@ -20,7 +21,7 @@ const INVOKE = new Set([
 
 const EVENTS = new Set([
   'run:log', 'run:status', 'run:progress', 'run:done', 'run:busy',
-  'zip:progress', 'env:changed',
+  'zip:progress', 'env:changed', 'review:exported',
   'ui:refresh', 'ui:settings', 'ui:focus-url', 'ui:doctor', 'ui:about',
 ]);
 

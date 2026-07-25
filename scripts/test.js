@@ -35,6 +35,11 @@ const settings = require('../lib/settings');
 const projectsReg = require('../lib/projects');
 const { describeLocal } = require('../lib/library');
 const { LiveReload } = require('../lib/livereload');
+const reviewsStore = require('../lib/reviews');
+const calibrationStore = require('../lib/calibration');
+const { exportReview, styleLine } = require('../lib/reviewExport');
+const { ReviewManager } = require('../lib/review');
+const { locateSource } = require('../lib/sourceline');
 
 let passed = 0;
 const failures = [];
@@ -692,6 +697,281 @@ async function liveReloadTests() {
   }
 }
 
+/* ---------------- review data layer ---------------- */
+async function reviewStoreTests() {
+  console.log('\nreview store');
+
+  const PRJ = 'prj_test01';
+
+  await check('a rating without a reason is rejected at the data layer', async () => {
+    await throws(() => reviewsStore.addAnnotation(PRJ, {
+      scope: 'element', context: {}, input: { rating: 5 },
+    }), 'bare rating');
+    await throws(() => reviewsStore.addAnnotation(PRJ, {
+      scope: 'element', context: {}, input: { rating: 5, why: 'too gray' },
+    }), 'why under 10 chars');
+    await throws(() => reviewsStore.addAnnotation(PRJ, {
+      scope: 'element', context: {}, input: {},
+    }), 'entirely empty');
+  });
+
+  await check('a rating with a real reason saves, and joins todays review', () => {
+    const annotation = reviewsStore.addAnnotation(PRJ, {
+      scope: 'element',
+      context: { selector: 'h1.hero', viewport: { width: 1440, height: 900, label: 'desktop' } },
+      input: { rating: 3, severity: 'blocking', axes: ['typography', 'bogus-axis'], why: 'Reads like body copy, no weight at all.', want: 'Heavier.' },
+    });
+    ok(/^ann_[0-9a-f]{8}$/.test(annotation.id), 'id shape: ' + annotation.id);
+    ok(/^rev_\d{8}_\d{2}$/.test(annotation.reviewId), 'review id shape: ' + annotation.reviewId);
+    eq(annotation.input.axes, ['typography'], 'unknown axes filtered: ');
+    eq(annotation.input.rating, 3);
+    const again = reviewsStore.addAnnotation(PRJ, {
+      scope: 'global', context: {}, input: { why: 'Buttons are all too round sitewide.' },
+    });
+    eq(again.reviewId, annotation.reviewId, 'same session: ');
+  });
+
+  await check('update validates too — you cannot strip the reason from a rated note', async () => {
+    const [first] = reviewsStore.listAnnotations(PRJ);
+    await throws(() => reviewsStore.updateAnnotation(PRJ, first.id, { input: { why: '' } }), 'why removed');
+    const patched = reviewsStore.updateAnnotation(PRJ, first.id, { input: { want: 'Near-black, 72px.' } });
+    eq(patched.input.want, 'Near-black, 72px.');
+    eq(patched.input.rating, 3, 'rating survived the patch: ');
+  });
+
+  await check('resolve keeps the old rating and records the new one', () => {
+    const [first] = reviewsStore.listAnnotations(PRJ);
+    const resolved = reviewsStore.updateAnnotation(PRJ, first.id, { resolved: true, resolvedRating: 8 });
+    eq(resolved.resolved, true);
+    eq(resolved.input.rating, 3, 'original rating intact: ');
+    eq(resolved.resolvedRating, 8);
+    ok(resolved.resolvedAt, 'resolve timestamped');
+    reviewsStore.updateAnnotation(PRJ, first.id, { resolved: false });
+  });
+
+  await check('calibration anchors persist and render high-to-low', () => {
+    calibrationStore.addAnchor({ rating: 4, axis: 'spacing', summary: '32px section padding at 1440', note: 'Cramped' });
+    calibrationStore.addAnchor({ rating: 9, axis: 'typography', summary: 'Söhne 600 at 72px, near-black' });
+    ok(calibrationStore.addStandingPreference('Prefers near-black over pure black for text'), 'first add');
+    ok(!calibrationStore.addStandingPreference('prefers near-black over pure black for text'), 'case-insensitive dedupe');
+    const md = calibrationStore.renderMarkdown();
+    ok(md.indexOf('9/10') < md.indexOf('4/10'), 'anchors sorted high to low');
+    ok(md.includes('Standing preferences'), 'preferences section present');
+  });
+
+  await check('locateSource finds a unique line and refuses ambiguity', () => {
+    const dir = scratch('srcline');
+    fs.writeFileSync(path.join(dir, 'page.html'),
+      '<html>\n<body>\n<h1 class="display">Build faster</h1>\n<p>x</p>\n<p>x</p>\n</body>\n</html>');
+    const hit = locateSource(dir, { context: { sourceFile: 'page.html', outerHTML: '<h1 class="display">Build faster</h1>' } });
+    eq(hit.sourceLine, 3);
+    const miss = locateSource(dir, { context: { sourceFile: 'page.html', outerHTML: '<p>x</p>' } });
+    eq(miss.sourceLine, null, 'ambiguous match refused: ');
+    const gone = locateSource(dir, { context: { sourceFile: 'nope.html', outerHTML: '<h1>x</h1>' } });
+    eq(gone.sourceLine, null);
+  });
+}
+
+/* ---------------- review export ---------------- */
+async function reviewExportTests() {
+  console.log('\nreview export');
+
+  const PRJ = 'prj_export1';
+  const capsRoot = scratch('export-root');
+  const project = { id: PRJ, name: 'Client Site', kind: 'local', path: capsRoot };
+
+  reviewsStore.addAnnotation(PRJ, {
+    scope: 'element',
+    context: {
+      selector: 'footer p.legal', selectorFallback: 'body > footer > p:nth-child(3)',
+      sourceFile: 'index.html', sourceLine: 203,
+      viewport: { width: 1440, height: 900, label: 'desktop' },
+      computedStyles: { fontFamily: 'Inter, sans-serif', fontWeight: '400', fontSize: '12px', lineHeight: '18px', color: '#9ca3af', backgroundColor: 'transparent', margin: '24px 0px 0px 0px', padding: '0px', display: 'block' },
+    },
+    input: { rating: 7, severity: 'nitpick', axes: ['copy'], why: 'The year is stale and the name is spelled two ways.', want: 'Current year, one spelling.' },
+  });
+  reviewsStore.addAnnotation(PRJ, {
+    scope: 'element',
+    context: {
+      selector: 'section.hero > h1.display',
+      viewport: { width: 1440, height: 900, label: 'desktop' },
+      computedStyles: { fontFamily: 'Inter, sans-serif', fontWeight: '400', fontSize: '42px', lineHeight: '48px', color: '#6b7280' },
+    },
+    input: {
+      rating: 3, severity: 'blocking', axes: ['typography'],
+      why: 'Reads like body copy. No weight contrast against the subhead.',
+      want: 'Heavier, larger, near-black.',
+      referenceProjectId: 'prj_ref', referenceSelector: 'header h1',
+      referenceStyles: { fontFamily: 'Söhne', fontWeight: '600', fontSize: '72px', lineHeight: '76px', color: '#111111' },
+    },
+  });
+  reviewsStore.addAnnotation(PRJ, {
+    scope: 'element',
+    context: { selector: '.pricing .card', viewport: { width: 375, height: 812, label: 'mobile' } },
+    input: { rating: 6, severity: 'should-fix', axes: ['spacing'], why: 'Cards are cramped against the border.', want: 'More padding.' },
+  });
+  reviewsStore.addAnnotation(PRJ, {
+    scope: 'global', context: {},
+    input: { severity: 'should-fix', why: 'Every button is too round.', want: 'Cap radius at 6px sitewide.' },
+  });
+
+  await check('export writes the folder the plan specifies', () => {
+    const result = exportReview({
+      project, capturesRoot: capsRoot,
+      projectNameFor: id => (id === 'prj_ref' ? 'collection.industries' : null),
+    });
+    ok(fs.existsSync(path.join(result.folder, 'REVIEW.md')), 'REVIEW.md');
+    ok(fs.existsSync(path.join(result.folder, 'calibration.md')), 'calibration.md');
+    ok(fs.existsSync(path.join(result.folder, 'annotations.json')), 'annotations.json');
+    ok(fs.existsSync(path.join(result.folder, 'shots')), 'shots dir');
+    ok(result.folder.includes('review-client-site-'), 'folder name: ' + result.folder);
+  });
+
+  await check('REVIEW.md orders blocking first, ascending rating, globals on top', () => {
+    const store = reviewsStore.listReviews(PRJ);
+    const md = fs.readFileSync(path.join(store[0].exportFolder, 'REVIEW.md'), 'utf8');
+    const hero = md.indexOf('[BLOCKING] section.hero');
+    const cards = md.indexOf('[SHOULD-FIX] .pricing .card');
+    const legal = md.indexOf('[NITPICK] footer p.legal');
+    const globals = md.indexOf('## Global notes');
+    ok(globals > -1 && globals < hero, 'global notes before elements');
+    ok(hero > -1 && cards > hero && legal > cards, `ordering: ${hero}/${cards}/${legal}`);
+    ok(md.includes('**Overall 5/10** · 1 blocking · 2 should-fix · 1 nitpick'), 'header counts');
+    ok(md.includes('Reviewed at 1440×900 and 375×812'), 'viewports listed');
+    ok(md.includes('**Reference:** collection.industries — `header h1`'), 'reference resolved');
+    ok(md.includes('Söhne 600 · 72px/76px'), 'reference styles line');
+    ok(md.includes('index.html:203'), 'file:line');
+    ok(md.includes('- Every button is too round. Cap radius at 6px sitewide. _(should-fix)_'), 'global note rendered');
+  });
+
+  await check('styleLine matches the hand-written sample format', () => {
+    eq(styleLine({
+      fontFamily: 'Inter, sans-serif', fontWeight: '400', fontSize: '42px', lineHeight: '48px',
+      letterSpacing: '0px', color: '#6b7280', backgroundColor: 'transparent',
+      margin: '0px 0px 16px 0px', padding: '0px', display: 'block',
+    }), 'Inter, sans-serif 400 · 42px/48px · letter-spacing 0px · color #6b7280 · background transparent · margin 0px 0px 16px 0px · padding 0px · display block');
+  });
+
+  await check('exporting marks the review closed; the next note starts a new one', () => {
+    const reviews = reviewsStore.listReviews(PRJ);
+    ok(reviews[0].exportedAt, 'exported stamp');
+    const next = reviewsStore.addAnnotation(PRJ, {
+      scope: 'global', context: {}, input: { why: 'Second round of feedback here.' },
+    });
+    ok(next.reviewId !== reviews[0].id, 'new session id: ' + next.reviewId);
+  });
+
+  await check('an empty review refuses to export', async () => {
+    const emptyPrj = { id: 'prj_empty', name: 'empty', kind: 'local', path: capsRoot };
+    await throws(() => exportReview({ project: emptyPrj, capturesRoot: capsRoot }), 'nothing to export');
+  });
+}
+
+/* ---------------- review API over http ---------------- */
+async function reviewApiTests() {
+  console.log('\nreview api');
+
+  const site = scratch('rev-api');
+  fs.writeFileSync(path.join(site, 'index.html'),
+    '<html><body><h1 class="hero">Review me</h1></body></html>');
+  const project = projectsReg.addLocal(site);
+
+  const manager = new ReviewManager({
+    projects: projectsReg,
+    capturesRoot: () => scratch('rev-api-caps'),
+    exportReview,
+    overlayPath: path.join(ROOT, 'renderer', 'review-overlay.js'),
+  });
+  const hostMgr = new HostManager();
+  hostMgr.reviewRouter = dir => manager.forDir(dir);
+  const port = await hostMgr.start(site, 4700);
+  manager.enable(site, project.id);
+
+  const request = (method, urlPath, body, headers = {}) => new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const req = http.request({
+      host: '127.0.0.1', port, path: urlPath, method,
+      headers: payload
+        ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload), ...headers }
+        : headers,
+    }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString();
+        let json = null;
+        try { json = JSON.parse(text); } catch { /* html page */ }
+        resolve({ status: res.statusCode, json, text });
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+
+  try {
+    await check('review mode injects the overlay and serves it', async () => {
+      const page = await request('GET', '/');
+      ok(page.text.includes('/__sitesnap__/review/client.js'), 'tag injected');
+      const script = await request('GET', '/__sitesnap__/review/client.js');
+      eq(script.status, 200);
+      ok(script.text.includes('__ssReview'), 'overlay script body');
+    });
+
+    await check('state reports the project and an open review', async () => {
+      const res = await request('GET', '/__sitesnap__/review/state');
+      eq(res.status, 200);
+      eq(res.json.project.id, project.id);
+      ok(/^rev_\d{8}_\d{2}$/.test(res.json.review.id), 'review id');
+      ok(Array.isArray(res.json.axes) && res.json.axes.includes('typography'), 'axes list');
+    });
+
+    await check('the no-reason rule surfaces as a 400, not a save', async () => {
+      const res = await request('POST', '/__sitesnap__/review/annotate', {
+        scope: 'element', context: { selector: 'h1.hero' }, input: { rating: 4 },
+      });
+      eq(res.status, 400);
+      ok(/reason/i.test(res.json.error), 'error mentions the reason: ' + res.json.error);
+    });
+
+    await check('a valid annotation round-trips through http', async () => {
+      const res = await request('POST', '/__sitesnap__/review/annotate', {
+        scope: 'element',
+        context: { selector: 'h1.hero', pageUrl: '/', viewport: { width: 1440, height: 900, label: 'desktop' } },
+        input: { rating: 4, severity: 'should-fix', why: 'Headline has no presence at all.', want: 'Bigger, bolder.' },
+      });
+      eq(res.status, 200);
+      ok(res.json.annotation.id, 'saved with id');
+      const state = await request('GET', '/__sitesnap__/review/state');
+      eq(state.json.annotations.length, 1);
+    });
+
+    await check('cross-origin posts are refused', async () => {
+      const res = await request('POST', '/__sitesnap__/review/annotate', {
+        scope: 'global', context: {}, input: { why: 'Sneaky cross-site write attempt.' },
+      }, { Origin: 'http://evil.example' });
+      eq(res.status, 403);
+    });
+
+    await check('export over http produces the folder and reveal is scoped', async () => {
+      const res = await request('POST', '/__sitesnap__/review/export');
+      eq(res.status, 200);
+      ok(fs.existsSync(path.join(res.json.folder, 'REVIEW.md')), 'REVIEW.md exists');
+    });
+
+    await check('done turns the api off; the page serves clean again', async () => {
+      const res = await request('POST', '/__sitesnap__/review/done');
+      eq(res.status, 200);
+      const after = await request('GET', '/__sitesnap__/review/state');
+      eq(after.status, 404);
+      const page = await request('GET', '/');
+      ok(!page.text.includes('review/client.js'), 'injection gone');
+    });
+  } finally {
+    hostMgr.stopAll();
+  }
+}
+
 /* ---------------- misc ---------------- */
 async function miscTests() {
   console.log('\nurl + settings');
@@ -753,6 +1033,9 @@ async function miscTests() {
   await entryTests();
   await projectTests();
   await liveReloadTests();
+  await reviewStoreTests();
+  await reviewExportTests();
+  await reviewApiTests();
   await miscTests();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

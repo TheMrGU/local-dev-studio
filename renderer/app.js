@@ -555,6 +555,7 @@ function renderCard(site) {
     } });
   }
   if (site.projectId) {
+    more.push({ icon: 'history', label: 'Review history', fn: () => openHistory(site) });
     more.push({ icon: 'refresh', label: site.liveReload ? 'Live reload: on' : 'Live reload: off', fn: async () => {
       await invoke('project:setLiveReload', { id: site.projectId, liveReload: !site.liveReload });
       await refreshLibrary();
@@ -583,6 +584,13 @@ function renderCard(site) {
       invoke('open:url', { url: `http://localhost:${site.port}/` })));
   } else if (!site.missing) {
     actions.appendChild(textButton('globe', 'Host', 'primary', () => hostSite(site.dir)));
+  }
+  if (site.projectId && !site.missing) {
+    actions.appendChild(iconBtn('note', 'Review this site (annotate + export a spec)', async () => {
+      await invoke('review:start', { dir: site.dir });
+      toast('Review mode on — annotate in the browser, then Export from the toolbar', { kind: 'ok', timeout: 7000 });
+      await refreshLibrary();
+    }));
   }
   if (site.kind === 'extracted') {
     actions.appendChild(iconBtn('palette', 'Recolor palette', () => openPalette(site)));
@@ -668,6 +676,46 @@ $('#libSort').addEventListener('change', e => {
 $('#libShowRaw').addEventListener('change', e => {
   invoke('settings:set', { showRaw: e.target.checked }).catch(() => {});
   renderLibrary();
+});
+
+/* ---------- review history ---------- */
+async function openHistory(site) {
+  const { reviews } = await invoke('review:history', { id: site.projectId });
+  $('#historyTitle').textContent = `Review history — ${site.name}`;
+  const list = $('#historyList');
+  list.innerHTML = '';
+  if (!reviews.length) {
+    list.innerHTML = '<div class="history-empty">No reviews yet — click the speech-bubble button on the card to start one.</div>';
+  }
+  for (const review of reviews) {
+    const row = document.createElement('div');
+    row.className = 'history-row';
+    const info = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = review.id.replace(/^rev_(\d{4})(\d{2})(\d{2})_(\d+)$/, '$1-$2-$3 #$4');
+    const meta = document.createElement('span');
+    meta.className = 'mini';
+    meta.textContent = ` ${review.annotations} note${review.annotations === 1 ? '' : 's'}`
+      + (review.resolved ? ` · ${review.resolved} resolved` : '')
+      + (review.exportedAt ? ' · exported' : ' · open');
+    info.appendChild(title);
+    info.appendChild(meta);
+    row.appendChild(info);
+    if (review.exportFolder) {
+      row.appendChild(iconBtn('folder', 'Open export folder', () =>
+        invoke('open:folder', { dir: review.exportFolder })));
+    }
+    list.appendChild(row);
+  }
+  $('#historyModal').classList.remove('hidden');
+}
+$('#historyClose').addEventListener('click', () => $('#historyModal').classList.add('hidden'));
+
+window.snap.on('review:exported', ({ project, folder }) => {
+  toast(`Review of ${project} exported`, {
+    kind: 'ok', timeout: 12000,
+    action: { label: 'Open folder', fn: () => invoke('open:folder', { dir: folder }) },
+  });
 });
 
 /* ---------- palette ---------- */
@@ -790,7 +838,7 @@ window.snap.on('env:changed', () => refreshEnv());
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeMenu();
-    for (const sel of ['#settingsModal', '#doctorModal', '#aboutModal', '#paletteDrawer']) {
+    for (const sel of ['#settingsModal', '#doctorModal', '#aboutModal', '#paletteDrawer', '#historyModal']) {
       $(sel).classList.add('hidden');
     }
   }
@@ -802,7 +850,7 @@ document.addEventListener('keydown', e => {
 });
 
 // Click the backdrop to dismiss a modal.
-for (const id of ['settingsModal', 'doctorModal', 'aboutModal']) {
+for (const id of ['settingsModal', 'doctorModal', 'aboutModal', 'historyModal']) {
   document.getElementById(id).addEventListener('click', e => {
     if (e.target.id === id) e.target.classList.add('hidden');
   });

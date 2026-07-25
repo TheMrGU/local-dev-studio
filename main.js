@@ -16,12 +16,71 @@ const { fixVideos } = require('./lib/videofix');
 const { zipFolder } = require('./lib/zip');
 const { listLibrary, describeLocal, invalidate } = require('./lib/library');
 const projects = require('./lib/projects');
+const reviews = require('./lib/reviews');
+const calibration = require('./lib/calibration');
+const { exportReview } = require('./lib/reviewExport');
+const { ReviewManager } = require('./lib/review');
+const { captureAnnotationShots } = require('./lib/shots');
+const { locateSource } = require('./lib/sourceline');
 const { makeThumb } = require('./lib/thumbs');
 const { buildMenu } = require('./lib/menu');
 
 const hosts = new HostManager();
 let win = null;
 let job = null;   // { name, controller } — one long-running pipeline at a time
+
+// ---------- review mode ----------
+// The overlay in the user's browser talks HTTP to the hosted site's own
+// server; ReviewManager routes those calls and this wiring supplies the few
+// Electron-touching pieces: screenshots, source mapping, shell access.
+const reviewManager = new ReviewManager({
+  projects,
+  capturesRoot: () => settings.load().capturesRoot,
+  exportReview,
+  overlayPath: path.join(__dirname, 'renderer', 'review-overlay.js'),
+  onAnnotationSaved: (project, annotation) => enrichAnnotation(project, annotation),
+  onExported: (project, result) => {
+    log.info('review exported', project.name, result.folder);
+    send('review:exported', { project: project.name, folder: result.folder });
+    send('ui:refresh');
+  },
+  onReveal: folder => shell.openPath(folder),
+  onReferenceHost: async (target, pick) => {
+    const port = await hosts.start(target.path, target.port, { liveReload: false });
+    if (port !== target.port) projects.update(target.id, { port });
+    reviewManager.enable(target.path, target.id, { pick });
+    return `http://localhost:${port}/`;
+  },
+  onDone: (project, dir) => {
+    log.info('review done', dir);
+    send('ui:refresh');
+  },
+});
+hosts.reviewRouter = dir => reviewManager.forDir(dir);
+
+/** Fill in what the overlay can't know: source file/line from the served
+ *  files, then element + context screenshots from an offscreen render. */
+async function enrichAnnotation(project, annotation) {
+  try {
+    if (annotation.scope === 'element' || annotation.scope === 'region') {
+      const located = locateSource(project.path, annotation);
+      const port = hosts.portFor(project.path);
+      const patch = { ...located };
+      if (port) {
+        const shots = await captureAnnotationShots(annotation, {
+          port, shotsDir: reviews.shotsDir(project.id),
+        });
+        if (shots) {
+          if (shots.el) patch.screenshotElement = 'shots/' + shots.el;
+          if (shots.ctx) patch.screenshotContext = 'shots/' + shots.ctx;
+        }
+      }
+      reviews.updateAnnotation(project.id, annotation.id, { context: patch });
+    }
+  } catch (err) {
+    log.warn('annotation enrich failed', annotation.id, err.message);
+  }
+}
 
 app.setAppUserModelId('com.nightshyft.sitesnap');
 
@@ -361,6 +420,39 @@ function registerIpc() {
     return project.liveReload;
   });
 
+  handle('review:start', async ({ dir }) => {
+    assertManaged(dir, 'The site folder');
+    const project = projects.byPath(dir);
+    if (!project) throw new Error('Only library projects can be reviewed — host it once first.');
+    const port = await hosts.start(project.path, project.port, { liveReload: !!project.liveReload });
+    if (port !== project.port) projects.update(project.id, { port });
+    reviewManager.enable(project.path, project.id);
+    const url = `http://localhost:${port}/`;
+    log.info('review start', project.path, port);
+    await shell.openExternal(url);
+    return { url, port };
+  });
+
+  handle('review:stop', ({ dir }) => {
+    assertManaged(dir, 'The site folder');
+    return reviewManager.disable(dir);
+  });
+
+  handle('review:history', ({ id }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    const annotations = reviews.listAnnotations(project.id);
+    return {
+      reviews: reviews.listReviews(project.id).map(review => ({
+        ...review,
+        annotations: annotations.filter(a => a.reviewId === review.id).length,
+        resolved: annotations.filter(a => a.reviewId === review.id && a.resolved).length,
+      })).reverse(),
+    };
+  });
+
+  handle('calibration:promote', ({ text }) => calibration.addStandingPreference(text));
+
   handle('capture:start', opts => {
     // Validate before returning so the UI can show input errors immediately.
     normalizeUrl(opts.url);
@@ -397,8 +489,15 @@ function registerIpc() {
     return { port: resolved, url: `http://localhost:${resolved}/` };
   });
 
-  handle('host:stop', ({ dir }) => hosts.stop(dir));
-  handle('host:stopAll', () => { hosts.stopAll(); return true; });
+  handle('host:stop', ({ dir }) => {
+    reviewManager.disable(dir);
+    return hosts.stop(dir);
+  });
+  handle('host:stopAll', () => {
+    for (const { dir } of hosts.list()) reviewManager.disable(dir);
+    hosts.stopAll();
+    return true;
+  });
 
   handle('zip:export', async ({ dir }) => {
     assertInRoot(dir, 'The site folder');

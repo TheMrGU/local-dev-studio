@@ -291,6 +291,19 @@ main { max-width: 1180px; margin: 0 auto; padding: 30px 28px; }
 .badge.live { color: #fff; background: var(--accent); border-color: transparent; cursor: pointer; letter-spacing: .02em; text-transform: none; font-family: var(--mono); font-size: 11px; }
 .badge.live:hover { filter: brightness(1.08); }
 
+/* ---------- review history modal ---------- */
+.history-list { max-height: 320px; overflow-y: auto; margin: 4px 0 6px; }
+.history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.history-row:last-child { border-bottom: none; }
+.history-empty { color: var(--soft); font-size: 12.5px; padding: 14px 2px; }
+
 /* Full-window hint while a folder is being dragged over the app. */
 .drop-hint {
   position: fixed;
