@@ -7,7 +7,7 @@ const INVOKE = new Set([
   'env:get',
   'settings:get', 'settings:set', 'settings:browseRoot', 'settings:browseBrowser',
   'library:list',
-  'project:addLocal', 'project:remove', 'project:setAutoStart',
+  'project:addLocal', 'project:remove', 'project:setAutoStart', 'project:setLiveReload',
   'capture:start', 'capture:cancel',
   'extract:run',
   'host:start', 'host:stop', 'host:stopAll',

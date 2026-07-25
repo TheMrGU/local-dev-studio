@@ -555,6 +555,10 @@ function renderCard(site) {
     } });
   }
   if (site.projectId) {
+    more.push({ icon: 'refresh', label: site.liveReload ? 'Live reload: on' : 'Live reload: off', fn: async () => {
+      await invoke('project:setLiveReload', { id: site.projectId, liveReload: !site.liveReload });
+      await refreshLibrary();
+    } });
     more.push({ icon: 'check', label: site.autoStart ? 'Auto-start: on' : 'Auto-start: off', fn: async () => {
       await invoke('project:setAutoStart', { id: site.projectId, autoStart: !site.autoStart });
       await refreshLibrary();

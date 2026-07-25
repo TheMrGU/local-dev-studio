@@ -34,6 +34,7 @@ const { normalizeUrl, nameFromUrl, reserveCaptureDir } = require('../lib/capture
 const settings = require('../lib/settings');
 const projectsReg = require('../lib/projects');
 const { describeLocal } = require('../lib/library');
+const { LiveReload } = require('../lib/livereload');
 
 let passed = 0;
 const failures = [];
@@ -563,6 +564,134 @@ async function projectTests() {
   });
 }
 
+/* ---------------- live reload ---------------- */
+async function liveReloadTests() {
+  console.log('\nlive reload');
+
+  const get = (port, urlPath) => new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path: urlPath }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    }).on('error', reject);
+  });
+
+  // Open the SSE stream and hand back a way to await the next parsed event.
+  const openSse = port => new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/__sitesnap__/events' }, res => {
+      const events = [];
+      const waiters = [];
+      let buffer = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => {
+        buffer += chunk;
+        let split;
+        while ((split = buffer.indexOf('\n\n')) !== -1) {
+          const block = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          const line = block.split('\n').find(l => l.startsWith('data: '));
+          if (!line) continue;
+          events.push(JSON.parse(line.slice(6)));
+          while (waiters.length && events.length) waiters.shift()(events.shift());
+        }
+      });
+      resolve({
+        status: res.statusCode,
+        headers: res.headers,
+        next: (ms = 3000) => new Promise((ok2, no2) => {
+          if (events.length) return ok2(events.shift());
+          const t = setTimeout(() => no2(new Error(`no SSE event within ${ms}ms`)), ms);
+          waiters.push(msg => { clearTimeout(t); ok2(msg); });
+        }),
+        quiet: ms => new Promise((ok2, no2) => {
+          const t = setTimeout(() => ok2(true), ms);
+          waiters.push(msg => { clearTimeout(t); no2(new Error('unexpected event: ' + JSON.stringify(msg))); });
+        }),
+        close: () => req.destroy(),
+      });
+    });
+    req.on('error', reject);
+  });
+
+  await check('inject lands before </body> and degrades to append', () => {
+    const lr = new LiveReload('.');
+    const injected = lr.inject(Buffer.from('<html><body><h1>x</h1></body></html>')).toString();
+    ok(/<script src="\/__sitesnap__\/livereload\.js" defer><\/script><\/body>/.test(injected),
+      'before </body>: ' + injected);
+    const headless = lr.inject(Buffer.from('just a fragment')).toString();
+    ok(headless.startsWith('just a fragment') && headless.includes('livereload.js'), 'appended: ' + headless);
+    lr.stop();
+  });
+
+  const site = scratch('lr-site');
+  fs.mkdirSync(path.join(site, 'css'), { recursive: true });
+  const pageOnDisk = '<!doctype html><html><body><h1>lr</h1></body></html>';
+  fs.writeFileSync(path.join(site, 'index.html'), pageOnDisk);
+  fs.writeFileSync(path.join(site, 'css', 'a.css'), 'body{color:red}');
+  fs.writeFileSync(path.join(site, 'clip.mp4'), Buffer.from('0123456789'));
+
+  const hostMgr = new HostManager();
+  const port = await hostMgr.start(site, 4500, { liveReload: true });
+
+  try {
+    await check('serves injected HTML while the disk stays untouched', async () => {
+      const res = await get(port, '/');
+      ok(res.body.toString().includes('/__sitesnap__/livereload.js'), 'script tag served');
+      eq(parseInt(res.headers['content-length'], 10), res.body.length, 'content-length matches: ');
+      eq(fs.readFileSync(path.join(site, 'index.html'), 'utf8'), pageOnDisk, 'disk byte-exact: ');
+      eq((await get(port, '/__sitesnap__/livereload.js')).status, 200);
+      ok((await get(port, '/__sitesnap__/livereload.js')).headers['content-type'].includes('javascript'),
+        'client script is javascript');
+    });
+
+    await check('range requests still work for media with live reload on', async () => {
+      const res = await new Promise((resolve, reject) => {
+        http.get({ host: '127.0.0.1', port, path: '/clip.mp4', headers: { Range: 'bytes=2-5' } }, r => {
+          const chunks = [];
+          r.on('data', c => chunks.push(c));
+          r.on('end', () => resolve({ status: r.statusCode, body: Buffer.concat(chunks).toString() }));
+        }).on('error', reject);
+      });
+      eq(res.status, 206);
+      eq(res.body, '2345');
+    });
+
+    await check('a css edit broadcasts a hot-swap, an html edit a reload', async () => {
+      const sse = await openSse(port);
+      eq(sse.status, 200);
+      ok(sse.headers['content-type'].includes('text/event-stream'), 'event-stream');
+      fs.writeFileSync(path.join(site, 'css', 'a.css'), 'body{color:blue}');
+      const cssEvent = await sse.next();
+      eq(cssEvent.type, 'css');
+      fs.writeFileSync(path.join(site, 'index.html'), pageOnDisk + ' ');
+      const htmlEvent = await sse.next();
+      eq(htmlEvent.type, 'reload');
+      sse.close();
+    });
+
+    await check('bookkeeping writes stay silent', async () => {
+      const sse = await openSse(port);
+      fs.mkdirSync(path.join(site, '.sitesnap'), { recursive: true });
+      fs.writeFileSync(path.join(site, '.sitesnap', 'undo.json'), '{}');
+      fs.writeFileSync(path.join(site, 'thumb.png'), 'png');
+      await sse.quiet(700);
+      sse.close();
+    });
+
+    await check('toggling live reload off restores byte-exact serving', async () => {
+      fs.writeFileSync(path.join(site, 'index.html'), pageOnDisk);
+      ok(hostMgr.setLive(site, false), 'toggle accepted');
+      const res = await get(port, '/');
+      eq(res.body.toString(), pageOnDisk, 'served bytes = disk bytes: ');
+      eq((await get(port, '/__sitesnap__/events')).status, 404, 'sse endpoint gone: ');
+      ok(hostMgr.setLive(site, true), 'toggle back on');
+      ok((await get(port, '/')).body.toString().includes('livereload.js'), 'injection is back');
+    });
+  } finally {
+    hostMgr.stopAll();
+  }
+}
+
 /* ---------------- misc ---------------- */
 async function miscTests() {
   console.log('\nurl + settings');
@@ -623,6 +752,7 @@ async function miscTests() {
   await serverTests();
   await entryTests();
   await projectTests();
+  await liveReloadTests();
   await miscTests();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

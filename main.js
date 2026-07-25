@@ -297,7 +297,13 @@ function registerIpc() {
     const sites = list.sites.map(site => {
       const project = site.kind === 'extracted' ? projects.byPath(site.dir) : null;
       return project
-        ? { ...site, projectId: project.id, projectPort: project.port, autoStart: project.autoStart }
+        ? {
+          ...site,
+          projectId: project.id,
+          projectPort: project.port,
+          autoStart: project.autoStart,
+          liveReload: project.liveReload,
+        }
         : site;
     });
     for (const project of projects.all()) {
@@ -308,6 +314,7 @@ function registerIpc() {
         projectId: project.id,
         projectPort: project.port,
         autoStart: project.autoStart,
+        liveReload: project.liveReload,
         port: hosts.portFor(project.path),
       });
     }
@@ -346,6 +353,14 @@ function registerIpc() {
     return project.autoStart;
   });
 
+  handle('project:setLiveReload', ({ id, liveReload }) => {
+    const project = projects.update(id, { liveReload: !!liveReload });
+    if (!project) throw new Error('Unknown project.');
+    // Applies immediately if the site is currently hosted.
+    hosts.setLive(project.path, project.liveReload);
+    return project.liveReload;
+  });
+
   handle('capture:start', opts => {
     // Validate before returning so the UI can show input errors immediately.
     normalizeUrl(opts.url);
@@ -368,7 +383,7 @@ function registerIpc() {
     assertManaged(dir, 'The site folder');
     const project = projects.byPath(dir);
     const want = port || (project && project.port) || settings.load().defaultPort;
-    const resolved = await hosts.start(dir, want);
+    const resolved = await hosts.start(dir, want, { liveReload: !!(project && project.liveReload) });
     if (project) {
       // If an external process squatted the registered port, the host manager
       // slid to a free one — persist that so the address stays stable from now on.
@@ -719,7 +734,7 @@ if (!app.requestSingleInstanceLock()) {
     for (const project of projects.all()) {
       if (!project.autoStart) continue;
       try {
-        const port = await hosts.start(project.path, project.port);
+        const port = await hosts.start(project.path, project.port, { liveReload: !!project.liveReload });
         if (port !== project.port) projects.update(project.id, { port });
         log.info('auto-hosting', project.path, port);
       } catch (err) {
