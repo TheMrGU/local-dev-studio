@@ -349,6 +349,34 @@ $('#btnStopAll').addEventListener('click', async () => {
   await refreshLibrary();
 });
 
+/* ---------- drag & drop: add a local folder as a project ---------- */
+let dragDepth = 0;
+window.addEventListener('dragenter', e => {
+  if (![...e.dataTransfer.types].includes('Files')) return;
+  dragDepth++;
+  document.body.classList.add('dropping');
+});
+window.addEventListener('dragleave', () => {
+  if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dropping'); }
+});
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', async e => {
+  e.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove('dropping');
+  for (const file of e.dataTransfer.files || []) {
+    try {
+      const project = await invoke('project:addLocal', { path: window.snap.pathForFile(file) });
+      toast(`Added "${project.name}" — its port is ${project.port}`, {
+        kind: 'ok', action: { label: 'Host now', fn: () => hostSite(project.path) },
+      });
+    } catch (err) {
+      failed(err);
+    }
+  }
+  await refreshLibrary();
+});
+
 /* ---------- library ---------- */
 function iconBtn(icon, title, fn) {
   const b = document.createElement('button');
@@ -432,11 +460,20 @@ function renderCard(site) {
     thumb.appendChild(letter);
   }
   const badge = document.createElement('span');
-  if (site.port) { badge.className = 'badge live'; badge.textContent = ':' + site.port; }
+  if (site.port) {
+    badge.className = 'badge live';
+    badge.textContent = 'localhost:' + site.port;
+    badge.title = 'Open in browser';
+    badge.addEventListener('click', e => {
+      e.stopPropagation();
+      invoke('open:url', { url: `http://localhost:${site.port}/` }).catch(failed);
+    });
+  } else if (site.missing) { badge.className = 'badge missing'; badge.textContent = 'missing'; }
+  else if (site.kind === 'local') { badge.className = 'badge local'; badge.textContent = 'local'; }
   else if (site.kind === 'extracted') { badge.className = 'badge extracted'; badge.textContent = 'extracted'; }
   else { badge.className = 'badge'; badge.textContent = 'raw'; }
   thumb.appendChild(badge);
-  if (site.kind === 'extracted' || site.port) {
+  if (!site.missing && (site.kind === 'extracted' || site.kind === 'local' || site.port)) {
     thumb.classList.add('clickable');
     thumb.title = 'Open this site';
     thumb.addEventListener('click', () => (site.port
@@ -450,11 +487,13 @@ function renderCard(site) {
   const name = document.createElement('div');
   name.className = 'card-name';
   name.textContent = site.name;
-  name.title = site.sourceUrl ? `${site.folder}\n${site.sourceUrl}` : site.folder;
+  name.title = site.sourceUrl ? `${site.folder}\n${site.sourceUrl}` : site.dir;
   const meta = document.createElement('div');
   meta.className = 'card-meta';
-  meta.textContent = `${site.pages} page${site.pages === 1 ? '' : 's'} · ${fileSize(site.sizeBytes)} · `
-    + new Date(site.mtime).toLocaleDateString();
+  meta.textContent = site.missing
+    ? 'folder not found on disk'
+    : `${site.pages} page${site.pages === 1 ? '' : 's'} · ${fileSize(site.sizeBytes)} · `
+      + new Date(site.mtime).toLocaleDateString();
   body.appendChild(name);
   body.appendChild(meta);
 
@@ -481,6 +520,20 @@ function renderCard(site) {
       await refreshLibrary();
     }
   };
+  // A local project is the user's own folder — removing it only forgets the
+  // library entry. Deleting files stays a captures-only operation.
+  const removeLocal = async () => {
+    const yes = await invoke('shell:confirm', {
+      title: 'Remove project',
+      message: `Remove "${site.name}" from the library?`,
+      detail: 'The folder and its files stay on disk — only the library entry goes away.',
+      confirmLabel: 'Remove',
+    });
+    if (!yes) return;
+    await invoke('project:remove', { id: site.projectId });
+    toast('Removed — files untouched', { kind: 'ok', timeout: 3000 });
+    await refreshLibrary();
+  };
 
   const more = [];
   if (site.port && site.hasSitemap) {
@@ -494,12 +547,20 @@ function renderCard(site) {
       const fixed = await invoke('video:fix', { dir: site.dir });
       toast(fixed ? `Restored ${fixed} video(s)` : 'No stripped videos found', { kind: fixed ? 'ok' : '' });
     } });
+  }
+  if (!site.missing && (site.kind === 'extracted' || site.kind === 'local')) {
     more.push({ icon: 'camera', label: 'Refresh preview', fn: async () => {
       await invoke('thumb:make', { dir: site.dir });
       await refreshLibrary();
     } });
   }
-  more.push({ icon: 'zip', label: 'Export ZIP', fn: exportZip });
+  if (site.projectId) {
+    more.push({ icon: 'check', label: site.autoStart ? 'Auto-start: on' : 'Auto-start: off', fn: async () => {
+      await invoke('project:setAutoStart', { id: site.projectId, autoStart: !site.autoStart });
+      await refreshLibrary();
+    } });
+  }
+  if (site.kind !== 'local') more.push({ icon: 'zip', label: 'Export ZIP', fn: exportZip });
 
   if (site.kind === 'raw') {
     actions.appendChild(textButton('unpack', 'Extract', 'primary', async () => {
@@ -516,13 +577,17 @@ function renderCard(site) {
     actions.appendChild(textButton('stop', 'Stop', 'stop', () => stopSite(site.dir)));
     actions.appendChild(iconBtn('open', 'Open in browser', () =>
       invoke('open:url', { url: `http://localhost:${site.port}/` })));
-  } else {
+  } else if (!site.missing) {
     actions.appendChild(textButton('globe', 'Host', 'primary', () => hostSite(site.dir)));
   }
   if (site.kind === 'extracted') {
     actions.appendChild(iconBtn('palette', 'Recolor palette', () => openPalette(site)));
   }
-  actions.appendChild(iconBtn('trash', 'Delete (to Recycle Bin)', deleteSite));
+  if (site.kind === 'local') {
+    actions.appendChild(iconBtn('trash', 'Remove from library (files stay on disk)', removeLocal));
+  } else {
+    actions.appendChild(iconBtn('trash', 'Delete (to Recycle Bin)', deleteSite));
+  }
   actions.appendChild(menuButton(more));
 
   body.appendChild(actions);
@@ -556,7 +621,7 @@ function renderLibrary() {
   if (!sites.length) {
     empty.textContent = state.library.sites.length
       ? 'Nothing matches that filter.'
-      : 'No captures yet — paste a URL above to grab your first site.';
+      : 'Nothing here yet — paste a URL above to capture a site, or drop a folder to add your own.';
   }
 
   const hosted = state.library.sites.filter(s => s.port);

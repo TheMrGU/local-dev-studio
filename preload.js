@@ -1,12 +1,13 @@
 // preload.js — the only bridge between the UI and the main process.
 // Channels are allowlisted so a compromised page (a captured site is untrusted
 // content, after all) can't reach anything that wasn't designed for it.
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const INVOKE = new Set([
   'env:get',
   'settings:get', 'settings:set', 'settings:browseRoot', 'settings:browseBrowser',
   'library:list',
+  'project:addLocal', 'project:remove', 'project:setAutoStart',
   'capture:start', 'capture:cancel',
   'extract:run',
   'host:start', 'host:stop', 'host:stopAll',
@@ -39,4 +40,7 @@ contextBridge.exposeInMainWorld('snap', {
     if (!EVENTS.has(channel)) throw new Error(`Blocked event: ${channel}`);
     ipcRenderer.on(channel, (event, data) => fn(data));
   },
+  // Dropped File objects no longer carry a .path in the renderer; this is the
+  // sanctioned way to recover the real filesystem path for a drag-dropped folder.
+  pathForFile: file => webUtils.getPathForFile(file),
 });

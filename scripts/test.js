@@ -32,6 +32,8 @@ const { makeHandler, HostManager } = require('../lib/server');
 const { resolveEntry } = require('../lib/entry');
 const { normalizeUrl, nameFromUrl, reserveCaptureDir } = require('../lib/capture');
 const settings = require('../lib/settings');
+const projectsReg = require('../lib/projects');
+const { describeLocal } = require('../lib/library');
 
 let passed = 0;
 const failures = [];
@@ -434,6 +436,133 @@ async function entryTests() {
   });
 }
 
+/* ---------------- project registry ---------------- */
+async function projectTests() {
+  console.log('\nproject registry');
+
+  const site = name => {
+    const dir = scratch('prj-' + name);
+    fs.writeFileSync(path.join(dir, 'index.html'), `<h1>${name}</h1>`);
+    return dir;
+  };
+
+  const a = site('a'), b = site('b'), c = site('c');
+  const capDir = site('cap');
+
+  await check('assigns each project its own port, starting at 4300', () => {
+    const pa = projectsReg.addLocal(a);
+    const pb = projectsReg.addLocal(b);
+    eq(pa.port, 4300);
+    eq(pb.port, 4301);
+    eq(pa.kind, 'local');
+    eq(pa.entryFile, 'index.html');
+    ok(pa.id !== pb.id, 'distinct ids');
+  });
+
+  await check('registers scanned captures once and keeps their port', () => {
+    projectsReg.syncCaptures([{ dir: capDir, name: 'cap', sourceUrl: 'https://x.test' }]);
+    const first = projectsReg.byPath(capDir);
+    ok(first, 'registered by the scan');
+    eq(first.kind, 'capture');
+    eq(first.port, 4302);
+    projectsReg.syncCaptures([{ dir: capDir, name: 'cap' }]);
+    const second = projectsReg.byPath(capDir);
+    eq(second.id, first.id, 'same identity on rescan: ');
+    eq(second.port, first.port, 'same port on rescan: ');
+  });
+
+  await check('prunes captures whose folder left the scan, keeps locals', () => {
+    projectsReg.syncCaptures([]);
+    ok(!projectsReg.byPath(capDir), 'capture entry gone');
+    ok(projectsReg.byPath(a), 'local project survived the prune');
+  });
+
+  await check('never hands out a released port in the same session', () => {
+    const pb = projectsReg.byPath(b);
+    projectsReg.remove(pb.id);
+    const pc = projectsReg.addLocal(c);
+    // 4301 (removed) and 4302 (pruned) are both off-limits until restart.
+    eq(pc.port, 4303);
+  });
+
+  await check('port assignments survive a reload', () => {
+    const before = projectsReg.byPath(c).port;
+    delete require.cache[require.resolve('../lib/projects')];
+    const fresh = require('../lib/projects');
+    eq(fresh.byPath(a).port, 4300);
+    eq(fresh.byPath(c).port, before);
+    ok(!fresh.byPath(b), 'removed project stayed removed');
+  });
+
+  await check('refuses junk folders with a sentence, not a crash', async () => {
+    await throws(() => projectsReg.addLocal(path.join(TMP, 'does-not-exist')), 'missing path');
+    const file = path.join(scratch('prj-file'), 'x.txt');
+    fs.writeFileSync(file, 'x');
+    await throws(() => projectsReg.addLocal(file), 'a file, not a folder');
+    await throws(() => projectsReg.addLocal(scratch('prj-empty')), 'no html inside');
+    await throws(() => projectsReg.addLocal(a), 'already registered');
+  });
+
+  await check('a squatted port slides to a free one and the new port persists', async () => {
+    // What main.js does on host:start when an external process owns the
+    // registered port: HostManager slides, the registry keeps the new port.
+    const foreign = http.createServer((req, res) => res.end('foreign'));
+    await new Promise(resolve => foreign.listen(0, '127.0.0.1', resolve));
+    const squatted = foreign.address().port;
+    const hostMgr = new HostManager();
+    try {
+      const resolved = await hostMgr.start(a, squatted);
+      ok(resolved !== squatted, `slid off ${squatted} to ${resolved}`);
+      const project = projectsReg.byPath(a);
+      projectsReg.update(project.id, { port: resolved });
+      eq(projectsReg.byPath(a).port, resolved);
+    } finally {
+      hostMgr.stopAll();
+      foreign.close();
+    }
+  });
+
+  await check('hosts five projects at once, each on its registry port', async () => {
+    // The Phase-1 acceptance shape: three locals + two captures, all up together.
+    const dirs = ['l1', 'l2', 'l3', 'c1', 'c2'].map(site);
+    const [l1, l2, l3] = dirs.slice(0, 3).map(d => projectsReg.addLocal(d));
+    projectsReg.syncCaptures([{ dir: dirs[3], name: 'c1' }, { dir: dirs[4], name: 'c2' }]);
+    const five = [l1, l2, l3, projectsReg.byPath(dirs[3]), projectsReg.byPath(dirs[4])];
+    const hostMgr = new HostManager();
+    try {
+      const bound = [];
+      for (const project of five) {
+        const port = await hostMgr.start(project.path, project.port);
+        if (port !== project.port) projectsReg.update(project.id, { port });
+        bound.push(port);
+      }
+      eq(new Set(bound).size, 5, 'five distinct ports: ');
+      for (let i = 0; i < five.length; i++) {
+        const body = await new Promise((resolve, reject) => {
+          http.get({ host: '127.0.0.1', port: bound[i], path: '/' }, res => {
+            const chunks = [];
+            res.on('data', ch => chunks.push(ch));
+            res.on('end', () => resolve(Buffer.concat(chunks).toString()));
+          }).on('error', reject);
+        });
+        ok(body.includes(path.basename(five[i].path).replace('prj-', '')), `site ${i} serves its own page`);
+      }
+    } finally {
+      hostMgr.stopAll();
+    }
+  });
+
+  await check('describes a local folder and flags a missing one', async () => {
+    const desc = await describeLocal({ path: a, name: 'proj-a' }, path.join(TMP, 'no-thumb.png'));
+    eq(desc.kind, 'local');
+    eq(desc.pages, 1);
+    eq(desc.missing, false);
+    ok(desc.sizeBytes > 0, 'size counted');
+    const gone = await describeLocal({ path: path.join(TMP, 'vanished'), name: 'x' }, '');
+    eq(gone.missing, true);
+  });
+}
+
 /* ---------------- misc ---------------- */
 async function miscTests() {
   console.log('\nurl + settings');
@@ -493,6 +622,7 @@ async function miscTests() {
   await zipTests();
   await serverTests();
   await entryTests();
+  await projectTests();
   await miscTests();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

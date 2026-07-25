@@ -14,7 +14,8 @@ const { HostManager } = require('./lib/server');
 const { scanPalette, applyColor, undoColor, listUndo } = require('./lib/palette');
 const { fixVideos } = require('./lib/videofix');
 const { zipFolder } = require('./lib/zip');
-const { listLibrary, invalidate } = require('./lib/library');
+const { listLibrary, describeLocal, invalidate } = require('./lib/library');
+const projects = require('./lib/projects');
 const { makeThumb } = require('./lib/thumbs');
 const { buildMenu } = require('./lib/menu');
 
@@ -40,6 +41,18 @@ function assertInRoot(dir, what = 'That folder') {
   // A folder we're already hosting stays valid even if the root was changed since.
   if (!isInRoot(dir) && !hosts.portFor(dir)) {
     throw new Error(`${what} is outside the captures folder and was refused.`);
+  }
+  return path.resolve(dir);
+}
+
+/** The looser gate for read-and-serve operations (hosting, thumbnails, opening):
+ *  the captures root plus every folder the user explicitly registered as a
+ *  project. Content-mutating operations (palette, video fix, delete, zip) keep
+ *  the strict in-root rule — SiteSnap edits its own captures, not your repos. */
+function assertManaged(dir, what = 'That folder') {
+  if (typeof dir !== 'string' || !dir.trim()) throw new Error(`${what} is missing.`);
+  if (!isInRoot(dir) && !hosts.portFor(dir) && !projects.byPath(dir)) {
+    throw new Error(`${what} is not in the library and was refused.`);
   }
   return path.resolve(dir);
 }
@@ -274,7 +287,64 @@ function registerIpc() {
     return res.canceled ? null : res.filePaths[0];
   });
 
-  handle('library:list', () => listLibrary(settings.load().capturesRoot, dir => hosts.portFor(dir)));
+  handle('library:list', async () => {
+    const list = await listLibrary(settings.load().capturesRoot, dir => hosts.portFor(dir));
+    // The scan is still the source of truth for what exists; the registry adds
+    // identity (a stable id and port) to extracted captures and contributes the
+    // local projects the scan can't see.
+    projects.syncCaptures(list.sites.filter(s => s.kind === 'extracted'));
+
+    const sites = list.sites.map(site => {
+      const project = site.kind === 'extracted' ? projects.byPath(site.dir) : null;
+      return project
+        ? { ...site, projectId: project.id, projectPort: project.port, autoStart: project.autoStart }
+        : site;
+    });
+    for (const project of projects.all()) {
+      if (project.kind !== 'local') continue;
+      const described = await describeLocal(project, projects.thumbPath(project.id));
+      sites.push({
+        ...described,
+        projectId: project.id,
+        projectPort: project.port,
+        autoStart: project.autoStart,
+        port: hosts.portFor(project.path),
+      });
+    }
+    sites.sort((a, b) => b.mtime - a.mtime);
+    return { ...list, sites };
+  });
+
+  handle('project:addLocal', async ({ path: dir }) => {
+    if (typeof dir !== 'string' || !dir.trim()) throw new Error('No folder path received.');
+    if (isInRoot(dir)) throw new Error('That folder is already part of the captures library.');
+    const project = projects.addLocal(dir);
+    log.info('local project added', project.path, ':' + project.port);
+    // Thumbnail in the background — the card shows a letter tile until then.
+    makeThumb(project.path, projects.thumbPath(project.id))
+      .then(made => { if (made) send('ui:refresh'); })
+      .catch(() => {});
+    return project;
+  });
+
+  handle('project:remove', async ({ id }) => {
+    const project = projects.byId(id);
+    if (!project) return false;
+    if (project.kind !== 'local') {
+      throw new Error('Captures are deleted from their card — this only removes local projects.');
+    }
+    hosts.stop(project.path);
+    projects.remove(id);
+    fs.promises.rm(projects.thumbPath(id), { force: true }).catch(() => {});
+    log.info('local project removed', project.path);
+    return true;
+  });
+
+  handle('project:setAutoStart', ({ id, autoStart }) => {
+    const project = projects.update(id, { autoStart: !!autoStart });
+    if (!project) throw new Error('Unknown project.');
+    return project.autoStart;
+  });
 
   handle('capture:start', opts => {
     // Validate before returning so the UI can show input errors immediately.
@@ -295,8 +365,19 @@ function registerIpc() {
   });
 
   handle('host:start', async ({ dir, port }) => {
-    assertInRoot(dir, 'The site folder');
-    const resolved = await hosts.start(dir, port || settings.load().defaultPort);
+    assertManaged(dir, 'The site folder');
+    const project = projects.byPath(dir);
+    const want = port || (project && project.port) || settings.load().defaultPort;
+    const resolved = await hosts.start(dir, want);
+    if (project) {
+      // If an external process squatted the registered port, the host manager
+      // slid to a free one — persist that so the address stays stable from now on.
+      projects.update(project.id, {
+        lastOpened: new Date().toISOString(),
+        ...(project.port !== resolved ? { port: resolved } : {}),
+      });
+      if (project.port !== resolved) log.info('port reassigned', dir, `${project.port} -> ${resolved}`);
+    }
     log.info('hosting', dir, resolved);
     return { port: resolved, url: `http://localhost:${resolved}/` };
   });
@@ -343,19 +424,21 @@ function registerIpc() {
   });
 
   handle('thumb:make', async ({ dir }) => {
-    assertInRoot(dir, 'The site folder');
-    const thumb = await makeThumb(dir);
+    assertManaged(dir, 'The site folder');
+    const project = projects.byPath(dir);
+    const out = project && project.kind === 'local' ? projects.thumbPath(project.id) : undefined;
+    const thumb = await makeThumb(dir, out);
     invalidate(dir);
     return thumb ? pathToFileURL(thumb).href + '?t=' + Date.now() : null;
   });
 
   handle('open:folder', ({ dir }) => {
-    assertInRoot(dir, 'That folder');
+    assertManaged(dir, 'That folder');
     return shell.openPath(dir);
   });
 
   handle('open:editor', ({ dir }) => {
-    assertInRoot(dir, 'That folder');
+    assertManaged(dir, 'That folder');
     const editor = findEditor();
     if (!editor) throw new Error('VS Code not found. Use "Open folder" instead.');
     // Args array, never a shell string — folder names are user data.
@@ -629,12 +712,30 @@ if (!app.requestSingleInstanceLock()) {
   process.on('uncaughtException', err => onFatal('uncaughtException', err));
   process.on('unhandledRejection', err => log.error('unhandledRejection', err));
 
+  // Projects marked autoStart come up hosting without a click. Failures are
+  // per-project and logged, never fatal — a missing folder must not take the
+  // rest of the fleet down with it.
+  async function autoStartProjects() {
+    for (const project of projects.all()) {
+      if (!project.autoStart) continue;
+      try {
+        const port = await hosts.start(project.path, project.port);
+        if (port !== project.port) projects.update(project.id, { port });
+        log.info('auto-hosting', project.path, port);
+      } catch (err) {
+        log.warn('auto-host failed', project.path, err.message);
+      }
+    }
+    send('ui:refresh');
+  }
+
   app.whenReady().then(async () => {
     log.info(`SiteSnap ${app.getVersion()} starting — electron ${process.versions.electron}`);
     registerIpc();
     createWindow();
     // Fill in a browser on first run without blocking the window.
     resolveBrowser().then(found => send('env:changed', { browser: found })).catch(err => log.warn('browser detect', err));
+    autoStartProjects().catch(err => log.warn('auto-host', err));
   }).catch(err => onFatal('startup', err));
 
   app.on('before-quit', () => {
