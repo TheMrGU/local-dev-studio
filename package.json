@@ -1,7 +1,7 @@
 {
   "name": "sitesnap",
   "productName": "SiteSnap",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Capture any website, extract it into editable files, and host it locally.",
   "main": "main.js",
   "author": {
