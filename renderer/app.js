@@ -78,15 +78,20 @@ function fileSize(bytes) {
 }
 
 /* ---------- environment ---------- */
+// One word in the title bar, not a readout. The browser name, engine path and
+// captures folder all live one click away in Setup & diagnostics — spelling
+// them out up here was noise on every screen.
 async function refreshEnv() {
   state.env = await invoke('env:get');
   const { browser, singleFile, capturesRoot } = state.env;
-  const chip = (ok, label) => `<span class="dot ${ok ? 'ok' : 'bad'}"></span>${label}`;
-  $('#envStatus').innerHTML = [
-    chip(browser.ok, browser.ok ? browser.name : 'no browser'),
-    chip(singleFile.ok && capturesRoot.ok, 'engine'),
-  ].join('<span class="env-sep"></span>');
-  $('#envStatus').classList.toggle('warn', !(browser.ok && singleFile.ok && capturesRoot.ok));
+  const ok = browser.ok && singleFile.ok && capturesRoot.ok;
+  const button = $('#envStatus');
+  button.innerHTML = `<span class="dot ${ok ? 'ok' : 'bad'}"></span><span></span>`;
+  button.querySelector('span:last-child').textContent = ok ? 'Ready' : 'Setup needed';
+  button.classList.toggle('warn', !ok);
+  button.title = ok
+    ? `Ready — capturing with ${browser.name}. Click for setup & diagnostics.`
+    : 'Something needed for capturing is missing. Click for setup & diagnostics.';
   return state.env;
 }
 
@@ -125,7 +130,7 @@ function openDoctor(firstRun = false) {
   for (const item of list) {
     const li = document.createElement('li');
     li.className = item.ok ? 'ok' : 'bad';
-    li.innerHTML = `<svg aria-hidden="true"><use href="#i-${item.ok ? 'check' : 'alert'}"/></svg>`;
+    li.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#i-${item.ok ? 'check' : 'alert'}"/></svg>`;
     const body = document.createElement('div');
     const title = document.createElement('strong');
     title.textContent = item.title;
@@ -251,12 +256,36 @@ function applyRememberedOptions(settings) {
   $('#stripBanners').checked = settings.stripBanners;
   $('#showBrowser').checked = !settings.headless;
   $('#waitDelay').value = String(settings.waitDelay || 0);
+  syncOptions();
 }
 
-$('#btnAdvanced').addEventListener('click', () => {
-  const panel = $('#advanced');
-  panel.classList.toggle('hidden');
-  $('#btnAdvanced').innerHTML = panel.classList.contains('hidden') ? 'Advanced &#9662;' : 'Advanced &#9652;';
+/* The options panel is collapsed by default, so this one line has to say
+   everything the old row of checkboxes said — in words, not ticks. */
+function syncOptions() {
+  const crawl = $('#crawl').checked;
+  const bits = [crawl ? `whole site, depth ${$('#depth').value}` : 'single page'];
+  bits.push($('#mobile').checked ? 'mobile' : 'desktop');
+  if ($('#fixVideos').checked) bits.push('videos restored');
+  if ($('#stripBanners').checked) bits.push('banners stripped');
+  if ($('#showBrowser').checked) bits.push('browser visible');
+  const wait = parseInt($('#waitDelay').value, 10) || 0;
+  if (wait) bits.push(`${wait / 1000}s wait`);
+  const name = $('#siteName').value.trim();
+  if (name) bits.push(`saved as "${name}"`);
+  $('#optsSummary').textContent = bits.join('  ·  ');
+
+  // Depth is meaningless on a single-page capture — show it that way.
+  $('#depthRow').classList.toggle('off', !crawl);
+  $('#depth').disabled = !crawl;
+}
+
+$('#options').addEventListener('change', syncOptions);
+$('#siteName').addEventListener('input', syncOptions);
+
+$('#btnOptions').addEventListener('click', () => {
+  const panel = $('#options');
+  const open = panel.classList.toggle('hidden') === false;
+  $('#btnOptions').setAttribute('aria-expanded', String(open));
 });
 
 $('#captureForm').addEventListener('submit', async e => {
@@ -293,6 +322,7 @@ function startRunPanel(message) {
   $('#runPanel').classList.remove('hidden');
   $('#runLog').textContent = '';
   $('#runSpinner').className = 'spinner';
+  $('#runPanel .run-status').classList.remove('fail');
   $('#runStatus').textContent = message;
   $('#btnCancel').disabled = false;
   $('#btnCancel').classList.remove('hidden');
@@ -309,6 +339,8 @@ function stopRunPanel(kind, message) {
   $('#runSpinner').className = 'spinner ' + kind;
   $('#runStatus').textContent = message;
   $('#btnCancel').classList.add('hidden');
+  // The only red in the app: a run that actually failed.
+  $('#runPanel .run-status').classList.toggle('fail', kind === 'fail');
 }
 
 window.snap.on('run:log', text => {
@@ -406,12 +438,14 @@ window.addEventListener('drop', async e => {
 });
 
 /* ---------- library ---------- */
+// Every generated icon carries .icon. A bare <svg> with no size falls back to
+// 300×150, which is how the Host button once rendered as a billboard.
 function iconBtn(icon, title, fn) {
   const b = document.createElement('button');
   b.className = 'icon-btn';
   b.title = title;
   b.setAttribute('aria-label', title);
-  b.innerHTML = `<svg><use href="#i-${icon}"/></svg>`;
+  b.innerHTML = `<svg class="icon"><use href="#i-${icon}"/></svg>`;
   b.addEventListener('click', async () => {
     b.disabled = true;
     try { await fn(); } catch (err) { failed(err); } finally { b.disabled = false; }
@@ -419,10 +453,10 @@ function iconBtn(icon, title, fn) {
   return b;
 }
 
-function textButton(icon, label, className, fn) {
+function textButton(icon, label, fn) {
   const b = document.createElement('button');
-  b.className = `host-btn ${className}`;
-  b.innerHTML = `<svg><use href="#i-${icon}"/></svg> <span></span>`;
+  b.className = 'host-btn';
+  b.innerHTML = `<svg class="icon"><use href="#i-${icon}"/></svg> <span></span>`;
   b.querySelector('span').textContent = label;
   b.addEventListener('click', async () => {
     b.disabled = true;
@@ -455,7 +489,7 @@ function menuButton(items) {
     pop.anchor = b;
     for (const item of items) {
       const row = document.createElement('button');
-      row.innerHTML = `<svg><use href="#i-${item.icon}"/></svg><span></span>`;
+      row.innerHTML = `<svg class="icon"><use href="#i-${item.icon}"/></svg><span></span>`;
       row.querySelector('span').textContent = item.label;
       row.addEventListener('click', async () => {
         closeMenu();
@@ -596,7 +630,7 @@ function renderCard(site) {
   if (site.kind !== 'local') more.push({ icon: 'zip', label: 'Export ZIP', fn: exportZip });
 
   if (site.kind === 'raw') {
-    actions.appendChild(textButton('unpack', 'Extract', 'primary', async () => {
+    actions.appendChild(textButton('unpack', 'Extract', async () => {
       // Same panel as a capture, so progress and the log are visible.
       startRunPanel('Extracting…');
       try {
@@ -607,11 +641,11 @@ function renderCard(site) {
       }
     }));
   } else if (site.port) {
-    actions.appendChild(textButton('stop', 'Stop', 'stop', () => stopSite(site.dir)));
+    actions.appendChild(textButton('stop', 'Stop', () => stopSite(site.dir)));
     actions.appendChild(iconBtn('open', 'Open in browser', () =>
       invoke('open:url', { url: `http://localhost:${site.port}/` })));
   } else if (!site.missing) {
-    actions.appendChild(textButton('globe', 'Host', 'primary', () => hostSite(site.dir)));
+    actions.appendChild(textButton('globe', 'Host', () => hostSite(site.dir)));
   }
   if (site.projectId && !site.missing) {
     actions.appendChild(iconBtn('note', 'Review this site (annotate + export a spec)', async () => {
@@ -687,7 +721,7 @@ function renderRecent() {
     row.appendChild(info);
 
     if (site.kind === 'raw') {
-      row.appendChild(textButton('unpack', 'Extract', 'primary', async () => {
+      row.appendChild(textButton('unpack', 'Extract', async () => {
         startRunPanel('Extracting…');
         try {
           await invoke('extract:run', { dir: site.dir });
@@ -697,10 +731,10 @@ function renderRecent() {
         }
       }));
     } else if (site.port) {
-      row.appendChild(textButton('open', 'Open', 'stop', () =>
+      row.appendChild(textButton('open', 'Open', () =>
         invoke('open:url', { url: `http://localhost:${site.port}/` })));
     } else {
-      row.appendChild(textButton('globe', 'Host', 'primary', () => hostSite(site.dir)));
+      row.appendChild(textButton('globe', 'Host', () => hostSite(site.dir)));
     }
     list.appendChild(row);
   }
@@ -930,7 +964,127 @@ $('#palApply').addEventListener('click', async () => {
   }
 });
 
-/* ---------- menu + keyboard ---------- */
+/* ---------- command palette ----------
+   The app has no menu bar. Everything File/Edit/View/Sites/Help used to hold
+   lives here instead, plus a row per site in the library, searchable from
+   Ctrl+K. Rebuilt on open so hosted state is never stale. */
+const cmdState = { items: [], sel: 0 };
+
+function winAction(action) {
+  return () => invoke('win:action', { action }).catch(failed);
+}
+
+function allCommands() {
+  const list = [
+    { group: 'extractor', icon: 'globe', label: 'New capture', keys: 'Ctrl N',
+      fn: () => { setTab('extractor'); $('#url').focus(); $('#url').select(); } },
+    { group: 'extractor', icon: 'more', label: 'Capture options',
+      fn: () => {
+        setTab('extractor');
+        if ($('#options').classList.contains('hidden')) $('#btnOptions').click();
+        $('#options').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      } },
+    { group: 'view', icon: 'unpack', label: 'Go to Extractor', keys: 'Ctrl 1', fn: () => setTab('extractor') },
+    { group: 'view', icon: 'map', label: 'Go to Studio', keys: 'Ctrl 2', fn: () => setTab('studio') },
+    { group: 'library', icon: 'refresh', label: 'Refresh library', keys: 'F5', fn: refreshLibrary },
+    { group: 'library', icon: 'search', label: 'Filter the library', keys: '/',
+      fn: () => { setTab('studio'); $('#libSearch').focus(); } },
+    { group: 'library', icon: 'folder', label: 'Open captures folder', fn: winAction('capturesFolder') },
+  ];
+
+  for (const site of state.library.sites) {
+    if (site.missing) continue;
+    if (site.port) {
+      list.push({ group: 'sites', icon: 'open', label: `Open ${site.name} — localhost:${site.port}`,
+        fn: () => invoke('open:url', { url: `http://localhost:${site.port}/` }).catch(failed) });
+      list.push({ group: 'sites', icon: 'stop', label: `Stop ${site.name}`, fn: () => stopSite(site.dir) });
+    } else if (site.kind !== 'raw') {
+      list.push({ group: 'sites', icon: 'globe', label: `Host ${site.name}`, fn: () => hostSite(site.dir) });
+    }
+  }
+  if (state.library.sites.some(s => s.port)) {
+    list.push({ group: 'sites', icon: 'power', label: 'Stop all local servers',
+      fn: async () => { await invoke('host:stopAll').catch(failed); await refreshLibrary(); } });
+  }
+
+  list.push(
+    { group: 'app', icon: 'gear', label: 'Settings', keys: 'Ctrl ,', fn: openSettings },
+    { group: 'app', icon: 'check', label: 'Setup & diagnostics', fn: () => refreshEnv().then(() => openDoctor()) },
+    { group: 'app', icon: 'note', label: 'Open log file', fn: () => invoke('open:log').catch(failed) },
+    { group: 'app', icon: 'info', label: 'About SiteSlurp Studio', fn: openAbout },
+    { group: 'view', icon: 'zoom-in', label: 'Zoom in', keys: 'Ctrl +', fn: winAction('zoomIn') },
+    { group: 'view', icon: 'zoom-out', label: 'Zoom out', keys: 'Ctrl −', fn: winAction('zoomOut') },
+    { group: 'view', icon: 'search', label: 'Reset zoom', keys: 'Ctrl 0', fn: winAction('zoomReset') },
+    { group: 'view', icon: 'expand', label: 'Toggle full screen', keys: 'F11', fn: winAction('fullscreen') },
+    { group: 'app', icon: 'code', label: 'Developer tools', keys: 'Ctrl Shift I', fn: winAction('devtools') },
+  );
+  return list;
+}
+
+function renderCommands(query) {
+  const needle = query.trim().toLowerCase();
+  cmdState.items = allCommands().filter(cmd =>
+    !needle || `${cmd.label} ${cmd.group}`.toLowerCase().includes(needle));
+  cmdState.sel = 0;
+
+  const list = $('#cmdList');
+  list.innerHTML = '';
+  if (!cmdState.items.length) {
+    list.innerHTML = '<div class="cmd-empty">No command matches that.</div>';
+    return;
+  }
+  cmdState.items.forEach((cmd, index) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'cmd-item' + (index === 0 ? ' sel' : '');
+    row.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#i-${cmd.icon}"/></svg>`
+      + '<span class="cmd-label"></span>'
+      + (cmd.keys ? '<kbd></kbd>' : '<span class="cmd-group"></span>');
+    row.querySelector('.cmd-label').textContent = cmd.label;
+    if (cmd.keys) row.querySelector('kbd').textContent = cmd.keys;
+    else row.querySelector('.cmd-group').textContent = cmd.group;
+    row.addEventListener('click', () => runCommand(index));
+    row.addEventListener('mousemove', () => selectCommand(index));
+    list.appendChild(row);
+  });
+}
+
+function selectCommand(index) {
+  const rows = $('#cmdList').querySelectorAll('.cmd-item');
+  if (!rows.length) return;
+  cmdState.sel = (index + rows.length) % rows.length;
+  rows.forEach((row, i) => row.classList.toggle('sel', i === cmdState.sel));
+  rows[cmdState.sel].scrollIntoView({ block: 'nearest' });
+}
+
+async function runCommand(index) {
+  const cmd = cmdState.items[index];
+  if (!cmd) return;
+  closeCommands();
+  try { await cmd.fn(); } catch (err) { failed(err); }
+}
+
+function openCommands() {
+  $('#cmdModal').classList.remove('hidden');
+  $('#cmdInput').value = '';
+  renderCommands('');
+  $('#cmdInput').focus();
+}
+
+function closeCommands() {
+  $('#cmdModal').classList.add('hidden');
+}
+
+$('#btnPalette').addEventListener('click', openCommands);
+$('#cmdInput').addEventListener('input', e => renderCommands(e.target.value));
+$('#cmdInput').addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); selectCommand(cmdState.sel + 1); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); selectCommand(cmdState.sel - 1); }
+  else if (e.key === 'Enter') { e.preventDefault(); runCommand(cmdState.sel); }
+});
+
+/* ---------- events + keyboard ---------- */
+window.snap.on('ui:palette', openCommands);
 window.snap.on('ui:refresh', refreshLibrary);
 window.snap.on('ui:settings', openSettings);
 window.snap.on('ui:doctor', () => refreshEnv().then(() => openDoctor()));
@@ -942,9 +1096,16 @@ window.snap.on('env:changed', () => refreshEnv());
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeMenu();
-    for (const sel of ['#settingsModal', '#doctorModal', '#aboutModal', '#paletteDrawer', '#historyModal']) {
+    for (const sel of ['#cmdModal', '#settingsModal', '#doctorModal', '#aboutModal', '#paletteDrawer', '#historyModal']) {
       $(sel).classList.add('hidden');
     }
+  }
+  // Ctrl+K also arrives from the main process, but binding it here keeps the
+  // palette working if focus is somewhere that swallows the accelerator.
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    openCommands();
+    return;
   }
   if (e.key === 'Enter' && !$('#settingsModal').classList.contains('hidden')) $('#setSave').click();
   if ((e.ctrlKey || e.metaKey) && (e.key === '1' || e.key === '2')) {
@@ -959,15 +1120,45 @@ document.addEventListener('keydown', e => {
 });
 
 // Click the backdrop to dismiss a modal.
-for (const id of ['settingsModal', 'doctorModal', 'aboutModal', 'historyModal']) {
+for (const id of ['cmdModal', 'settingsModal', 'doctorModal', 'aboutModal', 'historyModal']) {
   document.getElementById(id).addEventListener('click', e => {
     if (e.target.id === id) e.target.classList.add('hidden');
   });
 }
 
+/* ---------- window controls fallback ----------
+   The window is frameless and expects Windows to paint minimise/maximise/close
+   into the slot the bar reserves. If that overlay never turns up, draw our own
+   — an app you cannot close is a worse outcome than a slightly busier bar. */
+function ensureWindowControls() {
+  const wco = navigator.windowControlsOverlay;
+  if (wco && wco.visible) return;
+  if (document.querySelector('.win-controls')) return;
+
+  const group = document.createElement('div');
+  group.className = 'win-controls';
+  const buttons = [
+    ['minimize', '', 'Minimize'],
+    ['maximize', '', 'Maximize'],
+    ['close', '', 'Close'],
+  ];
+  for (const [action, glyph, label] of buttons) {
+    const button = document.createElement('button');
+    button.textContent = glyph;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.addEventListener('click', () => invoke('win:action', { action }).catch(failed));
+    group.appendChild(button);
+  }
+  $('.topbar').appendChild(group);
+  // Nothing is reserved on the right any more, so take that padding back.
+  $('.topbar').style.paddingRight = '0';
+}
+
 /* ---------- init ---------- */
 (async () => {
   try {
+    ensureWindowControls();
     const [{ settings }] = await Promise.all([invoke('settings:get'), refreshEnv()]);
     state.settings = settings;
     applyRememberedOptions(settings);

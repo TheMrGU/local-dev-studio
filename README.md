@@ -1,6 +1,6 @@
 # SiteSlurp Studio
 
-**Website extractor & management, by [NightShyft Studios](https://siteslurp.com).**
+**Website extractor & management — [siteslurp.com](https://siteslurp.com).**
 
 Slurp any website into editable files, host it locally, and manage every client site in one
 place — built for the client-site-update workflow: extract a client's existing site, restyle
@@ -62,17 +62,24 @@ the grid clean.
 
 ## Keyboard
 
+There is no menu bar. `Ctrl+K` opens a command palette holding everything a menu would —
+plus a row per site, so you can host, open or stop any capture without finding its card.
+
 | Key | Action |
 | --- | --- |
+| `Ctrl+K` | Command palette |
 | `Ctrl+N` | Focus the URL box |
+| `Ctrl+1` / `Ctrl+2` | Extractor / Studio |
 | `F5` | Refresh the library |
 | `Ctrl+,` | Settings |
+| `Ctrl+ +` / `Ctrl+ -` / `Ctrl+0` | Zoom |
+| `F11` | Full screen |
 | `/` | Filter the library |
 | `Esc` | Close any panel |
 
 ## Troubleshooting
 
-Open **Help → Setup & diagnostics**, or click the status pills in the title bar. It reports the
+Click **Ready** in the title bar, or run **Setup & diagnostics** from `Ctrl+K`. It reports the
 browser it found, the capture engine path, and whether the captures folder is writable.
 
 **Help → Open log file** opens `%APPDATA%\SiteSlurp Studio\logs\siteslurp.log`, which records every
@@ -110,8 +117,9 @@ extract → thumbnail — and fails the exit code if any step doesn't finish.
 ### Layout
 
 ```
-main.js          window, menu, IPC, pipelines
+main.js          window, IPC, pipelines
 preload.js       the only renderer bridge (allowlisted channels)
+lib/accelerators.js  keyboard shortcuts (the app has no menu bar)
 lib/browsers.js  Chromium detection
 lib/capture.js   drives the bundled SingleFile CLI
 lib/extract.js   snapshot -> editable files

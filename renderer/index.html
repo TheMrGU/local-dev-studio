@@ -31,9 +31,17 @@
   <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></symbol>
   <symbol id="i-note" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/><path d="M8 9h8M8 13h5"/></symbol>
   <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 3v6h6"/><path d="M3.5 13a9 9 0 1 0 2.1-7.6L3 8"/><path d="M12 7v5l3 3"/></symbol>
+  <symbol id="i-zoom-in" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M11 8v6M8 11h6M20 20l-4.3-4.3"/></symbol>
+  <symbol id="i-zoom-out" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M8 11h6M20 20l-4.3-4.3"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M16 21h3a2 2 0 0 0 2-2v-3M8 21H5a2 2 0 0 1-2-2v-3"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9M18.4 6.6a9 9 0 1 1-12.8 0"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-5M12 8h.01"/></symbol>
 </svg>
 
-<header class="topbar">
+<!-- The window's own title bar. There is no OS frame and no menu strip behind
+     this: the bar is the drag handle, and Windows paints only its three control
+     buttons into the slot reserved on the right. -->
+<header class="topbar" id="topbar">
   <div class="brand">
     <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
       <defs><mask id="markCut">
@@ -44,27 +52,32 @@
       </mask></defs>
       <rect width="32" height="32" rx="9" fill="currentColor" mask="url(#markCut)"/>
     </svg>
-    <h1>SiteSlurp <em>Studio</em></h1>
+    <h1>SiteSlurp</h1>
   </div>
+
   <nav class="tabs" role="tablist" aria-label="Sections">
     <button class="tab on" id="tab-extractor" role="tab" aria-selected="true" aria-controls="view-extractor"
             title="Extractor (Ctrl+1)"><span class="tick" aria-hidden="true"></span>Extractor</button>
     <button class="tab" id="tab-studio" role="tab" aria-selected="false" aria-controls="view-studio"
             title="Studio (Ctrl+2)"><span class="tick" aria-hidden="true"></span>Studio<span class="tab-count" id="tabStudioCount"></span></button>
   </nav>
+
   <div class="topbar-right">
-    <button id="envStatus" class="env" title="Setup &amp; diagnostics"></button>
-    <button class="icon-btn" id="btnSettings" title="Settings (Ctrl+,)" aria-label="Settings"><svg><use href="#i-gear"/></svg></button>
+    <button id="btnPalette" class="cmd-trigger" title="Commands (Ctrl+K)">
+      <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+      <span>Search</span>
+      <kbd>Ctrl K</kbd>
+    </button>
+    <button id="envStatus" class="env" title="Setup &amp; diagnostics" aria-label="Setup and diagnostics"></button>
+    <button class="icon-btn" id="btnSettings" title="Settings (Ctrl+,)" aria-label="Settings"><svg class="icon"><use href="#i-gear"/></svg></button>
   </div>
 </header>
 
 <main>
 <section id="view-extractor" class="view" role="tabpanel" aria-labelledby="tab-extractor">
   <div class="pane-head">
-    <p class="eyebrow"><span class="tick" aria-hidden="true"></span> Extractor</p>
     <h2 class="pane-title">Paste a link. Slurp the whole site.</h2>
-    <p class="pane-sub">React, Next, anything — rendered in a real browser, then unpacked into
-      clean editable files you own.</p>
+    <p class="pane-sub">Rendered in a real browser, then unpacked into clean editable files you own.</p>
   </div>
 
   <section class="capture-panel">
@@ -74,29 +87,83 @@
                aria-label="Website URL">
         <button type="submit" id="btnCapture" class="primary">Capture site</button>
       </div>
-      <div class="opts-row">
-        <input id="siteName" type="text" placeholder="name (optional)" spellcheck="false" aria-label="Folder name">
-        <label class="opt"><input type="checkbox" id="crawl" checked> Whole site</label>
-        <label class="opt">Depth
-          <select id="depth" aria-label="Crawl depth">
-            <option>1</option><option selected>2</option><option>3</option><option>4</option><option>5</option>
-          </select>
-        </label>
-        <label class="opt"><input type="checkbox" id="mobile"> Mobile</label>
-        <label class="opt"><input type="checkbox" id="fixVideos" checked> Fix videos</label>
-        <button type="button" id="btnAdvanced" class="link-btn">Advanced &#9662;</button>
+
+      <!-- One line of state, one disclosure. The old two rows of loose
+           checkboxes are the clutter this replaces, and every option now
+           carries the sentence that says what it actually does. -->
+      <div class="opts-bar">
+        <p id="optsSummary" class="opts-summary"></p>
+        <button type="button" id="btnOptions" class="disclosure" aria-expanded="false" aria-controls="options">
+          Options<span class="caret" aria-hidden="true"></span>
+        </button>
       </div>
-      <div id="advanced" class="opts-row advanced hidden">
-        <label class="opt"><input type="checkbox" id="stripBanners" checked> Strip cookie banners</label>
-        <label class="opt"><input type="checkbox" id="showBrowser"> Show browser (for sites that block bots)</label>
-        <label class="opt">Extra wait
-          <select id="waitDelay" aria-label="Extra wait before capture">
-            <option value="0">none</option>
-            <option value="1000">1s</option>
-            <option value="3000">3s</option>
-            <option value="6000">6s</option>
-          </select>
-        </label>
+
+      <div id="options" class="options hidden">
+        <div class="opt-row">
+          <label class="opt-main"><input type="checkbox" id="crawl"> Capture the whole site</label>
+          <p class="opt-help">Follows the links it finds and saves every page it can reach. Turn this
+            off to grab only the single page you pasted.</p>
+        </div>
+
+        <div class="opt-row" id="depthRow">
+          <label class="opt-main" for="depth">Crawl depth
+            <select id="depth" aria-label="Crawl depth">
+              <option value="1">1 — the page and what it links to</option>
+              <option value="2" selected>2 — most marketing sites</option>
+              <option value="3">3 — larger sites</option>
+              <option value="4">4 — deep, slower</option>
+              <option value="5">5 — everything it can reach</option>
+            </select>
+          </label>
+          <p class="opt-help">How many clicks away from the starting page it is allowed to travel.
+            Depth&nbsp;1 is that page plus everything linked from it; depth&nbsp;2 also follows the
+            links on <em>those</em> pages, and so on. Each step multiplies the page count, so 4–5 on a
+            big site can mean thousands of pages and a very long run.</p>
+        </div>
+
+        <div class="opt-row">
+          <label class="opt-main"><input type="checkbox" id="mobile"> Capture the mobile layout</label>
+          <p class="opt-help">Pretends to be a phone, so responsive sites hand over their mobile
+            design instead of the desktop one.</p>
+        </div>
+
+        <div class="opt-row">
+          <label class="opt-main"><input type="checkbox" id="fixVideos"> Restore videos</label>
+          <p class="opt-help">The capture engine drops video files to keep snapshots small. This puts
+            the original video URLs back so the pages still play.</p>
+        </div>
+
+        <div class="opt-row">
+          <label class="opt-main"><input type="checkbox" id="stripBanners"> Strip cookie banners</label>
+          <p class="opt-help">Removes consent popups and the overlays that come with them, so the
+            saved pages open clean.</p>
+        </div>
+
+        <div class="opt-row">
+          <label class="opt-main"><input type="checkbox" id="showBrowser"> Show the browser while capturing</label>
+          <p class="opt-help">Runs the capture in a visible window instead of in the background. Useful
+            for sites that block bots, or when you need to log in or dismiss something by hand.</p>
+        </div>
+
+        <div class="opt-row">
+          <label class="opt-main" for="waitDelay">Extra wait before saving
+            <select id="waitDelay" aria-label="Extra wait before capture">
+              <option value="0">none</option>
+              <option value="1000">1 second</option>
+              <option value="3000">3 seconds</option>
+              <option value="6000">6 seconds</option>
+            </select>
+          </label>
+          <p class="opt-help">Pauses after the page loads so slow animations, lazy images and
+            late-loading content finish before the snapshot is taken.</p>
+        </div>
+
+        <div class="opt-row">
+          <label class="opt-main" for="siteName">Folder name
+            <input id="siteName" type="text" placeholder="from the domain" spellcheck="false">
+          </label>
+          <p class="opt-help">What to call this capture on disk. Leave it empty and the domain is used.</p>
+        </div>
       </div>
     </form>
 
@@ -122,7 +189,6 @@
 
 <section id="view-studio" class="view hidden" role="tabpanel" aria-labelledby="tab-studio">
   <div class="pane-head">
-    <p class="eyebrow"><span class="tick" aria-hidden="true"></span> Studio</p>
     <h2 class="pane-title">Every site you manage, in one place.</h2>
     <p class="pane-sub">Host any project on its own port, edit with live reload, and turn on-page
       feedback into a spec an agent can build from. Drop a folder anywhere to add it.</p>
@@ -138,7 +204,7 @@
     <div class="lib-head">
       <h3>Library <span id="libCount" class="lib-count"></span></h3>
       <div class="search">
-        <svg aria-hidden="true"><use href="#i-search"/></svg>
+        <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
         <input id="libSearch" type="text" placeholder="Filter…" spellcheck="false" aria-label="Filter captures">
       </div>
       <select id="libSort" aria-label="Sort captures">
@@ -146,8 +212,8 @@
         <option value="name">Name</option>
         <option value="size">Largest</option>
       </select>
-      <label class="opt"><input type="checkbox" id="libShowRaw"> Raw snapshots</label>
-      <button class="icon-btn" id="btnRefresh" title="Refresh (F5)" aria-label="Refresh"><svg><use href="#i-refresh"/></svg></button>
+      <label class="opt" title="Show the raw single-file snapshots that have already been unpacked"><input type="checkbox" id="libShowRaw"> Raw snapshots</label>
+      <button class="icon-btn" id="btnRefresh" title="Refresh (F5)" aria-label="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
     </div>
     <div id="libRoot" class="lib-root"></div>
     <div id="grid" class="grid"></div>
@@ -155,6 +221,23 @@
   </section>
 </section>
 </main>
+
+<!-- Command palette: everything the File/Edit/View/Sites/Help menu used to hold,
+     searchable instead of buried three levels down. -->
+<div id="cmdModal" class="modal cmd-modal hidden">
+  <div class="cmd-card" role="dialog" aria-label="Commands">
+    <div class="cmd-search">
+      <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+      <input id="cmdInput" type="text" placeholder="Search commands…" spellcheck="false" aria-label="Search commands">
+    </div>
+    <div id="cmdList" class="cmd-list" role="listbox"></div>
+    <div class="cmd-foot">
+      <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
+      <span><kbd>↵</kbd> run</span>
+      <span><kbd>esc</kbd> close</span>
+    </div>
+  </div>
+</div>
 
 <aside id="paletteDrawer" class="drawer hidden" aria-label="Palette">
   <div class="drawer-head">

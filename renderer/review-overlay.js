@@ -131,29 +131,35 @@
   const host = document.createElement('div');
   host.id = '__ss-review-host';
   const root = host.attachShadow({ mode: 'open' });
-  // Same scheme as the Studio window: near-black surfaces, gray type, acid for
+  // Same scheme as the Studio window: near-black surfaces, gray type, white for
   // the live thing. Shadow DOM keeps all of it off the page being reviewed.
-  const ACCENT = '#CDFF3C';
-  const INK = '#07070A';
-  const SURFACE = '#0F0F12';
-  const RAISED = '#17171C';
+  // Everything drawn *over* the page (highlights, pins) pairs white with a dark
+  // ring, because a white hairline alone disappears on a white site.
+  const ACCENT = '#FFFFFF';
+  const WASH = 'rgba(255,255,255,0.14)';
+  const RING = '0 0 0 1px rgba(0,0,0,0.85)';
+  const INK = '#0A0A0B';
+  const SURFACE = '#111113';
+  const RAISED = '#18181B';
   const LINE = 'rgba(255,255,255,0.14)';
-  const GRAY = '#A2A2AC';
-  const DIM = '#74747E';
+  const GRAY = '#A8A8B0';
+  const DIM = '#78787F';
 
   root.innerHTML = `<style>
     :host { all: initial; }
     * { box-sizing: border-box; font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
     .hl { position: fixed; pointer-events: none; z-index: 2147483600;
-          border: 1.5px solid ${ACCENT}; background: rgba(205,255,60,0.10); border-radius: 2px; display: none; }
+          border: 1.5px solid ${ACCENT}; background: ${WASH}; border-radius: 2px; display: none;
+          box-shadow: ${RING}, inset ${RING}; }
     .hl-tag { position: fixed; pointer-events: none; z-index: 2147483601; background: ${INK}; color: ${ACCENT};
           font-size: 11px; padding: 2px 7px; border-radius: 4px; display: none; white-space: nowrap; font-family: Consolas, monospace; }
     .sel { position: fixed; pointer-events: none; z-index: 2147483599;
-          border: 2px solid ${ACCENT}; border-radius: 2px; background: rgba(205,255,60,0.07); }
+          border: 2px solid ${ACCENT}; border-radius: 2px; background: rgba(255,255,255,0.10);
+          box-shadow: ${RING}, inset ${RING}; }
     .rgn { position: absolute; pointer-events: none; z-index: 2147483599;
-          border: 1.5px dashed ${ACCENT}; background: rgba(205,255,60,0.08); }
+          border: 1.5px dashed ${ACCENT}; background: rgba(255,255,255,0.10); box-shadow: ${RING}; }
     .bar { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 2147483646;
-          display: flex; gap: 4px; align-items: center; background: rgba(8,8,10,0.92); color: ${GRAY};
+          display: flex; gap: 4px; align-items: center; background: rgba(10,10,11,0.93); color: ${GRAY};
           border: 1px solid ${LINE};
           padding: 8px 10px; border-radius: 14px; box-shadow: 0 14px 44px rgba(0,0,0,0.55);
           font-size: 12.5px; backdrop-filter: blur(14px) saturate(140%); }
@@ -179,7 +185,10 @@
           padding: 4px 10px; cursor: pointer; }
     .chip:hover { border-color: rgba(255,255,255,0.3); color: #fff; }
     .chip.on { background: #fff; color: ${INK}; border-color: #fff; font-weight: 600; }
-    .chip.sev-on { background: ${ACCENT}; color: ${INK}; border-color: ${ACCENT}; font-weight: 600; }
+    /* Severity used to be told apart from a plain selected chip by hue. With one
+       color left, the ring does that job instead. */
+    .chip.sev-on { background: ${ACCENT}; color: ${INK}; border-color: ${ACCENT}; font-weight: 700;
+          box-shadow: 0 0 0 2px rgba(255,255,255,0.22); }
     textarea { width: 100%; border: 1px solid ${LINE}; border-radius: 8px; padding: 7px 9px; font-size: 12.5px;
           background: ${RAISED}; color: #fff; resize: vertical; min-height: 44px; margin-top: 2px; }
     textarea::placeholder { color: #55555E; }
@@ -190,11 +199,11 @@
     .actions { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
     .save { background: ${ACCENT}; color: ${INK}; border: none; border-radius: 999px; padding: 8px 18px;
           font-size: 12.5px; font-weight: 600; cursor: pointer; }
-    .save:hover:not(:disabled) { background: #fff; }
+    .save:hover:not(:disabled) { background: #DEDEE3; }
     .save:disabled { opacity: .38; cursor: default; }
     .ghost { background: none; border: none; color: ${DIM}; font-size: 12.5px; cursor: pointer; padding: 8px 6px; }
     .ghost:hover { color: #fff; }
-    .err { color: #FF6257; font-size: 11.5px; margin-top: 8px; display: none; }
+    .err { color: #FF5A4E; font-size: 11.5px; margin-top: 8px; display: none; }
     .toast { position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 2147483647;
           background: ${RAISED}; color: ${GRAY}; border: 1px solid ${LINE}; font-size: 12.5px; padding: 10px 16px; border-radius: 12px;
           display: flex; gap: 12px; align-items: center; box-shadow: 0 14px 44px rgba(0,0,0,0.5); }

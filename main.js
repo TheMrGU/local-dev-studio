@@ -23,7 +23,7 @@ const { ReviewManager } = require('./lib/review');
 const { captureAnnotationShots } = require('./lib/shots');
 const { locateSource } = require('./lib/sourceline');
 const { makeThumb } = require('./lib/thumbs');
-const { buildMenu } = require('./lib/menu');
+const { attachAccelerators, zoomBy } = require('./lib/accelerators');
 
 // This app shipped as "SiteSnap" through 1.x, and the rename moved the profile
 // folder. Copy the old profile (settings, projects, reviews) into the new
@@ -40,6 +40,10 @@ try {
 const hosts = new HostManager();
 let win = null;
 let job = null;   // { name, controller } — one long-running pipeline at a time
+
+// Kept in step with --titlebar-h in renderer/style.css: the custom bar and the
+// slot Windows paints its buttons into have to be exactly the same height.
+const TITLEBAR_HEIGHT = 46;
 
 // ---------- review mode ----------
 // The overlay in the user's browser talks HTTP to the hosted site's own
@@ -351,6 +355,29 @@ function handle(channel, fn) {
 
 function registerIpc() {
   handle('env:get', () => environment());
+
+  // Window-level actions the command palette offers now that there is no menu
+  // to hang them off. Deliberately a fixed allowlist, not an eval of a role.
+  handle('win:action', ({ action }) => {
+    if (!win || win.isDestroyed()) return false;
+    switch (action) {
+      case 'zoomIn': zoomBy(win, 0.5); return true;
+      case 'zoomOut': zoomBy(win, -0.5); return true;
+      case 'zoomReset': win.webContents.setZoomLevel(0); return true;
+      case 'fullscreen': win.setFullScreen(!win.isFullScreen()); return true;
+      case 'devtools': win.webContents.toggleDevTools(); return true;
+      case 'capturesFolder': {
+        const root = settings.load().capturesRoot;
+        fs.mkdirSync(root, { recursive: true });
+        shell.openPath(root);
+        return true;
+      }
+      case 'minimize': win.minimize(); return true;
+      case 'maximize': win.isMaximized() ? win.unmaximize() : win.maximize(); return true;
+      case 'close': win.close(); return true;
+      default: throw new Error(`Unknown window action: ${action}`);
+    }
+  });
   handle('settings:get', () => ({ settings: settings.load() }));
   handle('settings:set', patch => {
     const saved = settings.save(patch);
@@ -690,9 +717,19 @@ function createWindow() {
     y: bounds ? bounds.y : undefined,
     minWidth: 900,
     minHeight: 620,
-    backgroundColor: '#08080A',
+    backgroundColor: '#0A0A0B',
     title: 'SiteSlurp Studio',
     show: false,
+    // No OS title bar and no menu strip: the app draws its own 46px bar and
+    // Windows paints only the minimise/maximise/close buttons into the reserved
+    // slot on the right. The renderer positions itself with the
+    // env(titlebar-area-*) variables this turns on.
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#0A0A0B',
+      symbolColor: '#8E8E96',
+      height: TITLEBAR_HEIGHT,
+    },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -726,17 +763,7 @@ function createWindow() {
   win.on('move', debounce(persistBounds, 400));
   win.on('close', persistBounds);
 
-  buildMenu({
-    win,
-    send,
-    onStopAllHosts: () => { hosts.stopAll(); send('ui:refresh'); },
-    openCapturesFolder: () => {
-      const root = settings.load().capturesRoot;
-      fs.mkdirSync(root, { recursive: true });
-      shell.openPath(root);
-    },
-    logPath: log.logPath,
-  });
+  attachAccelerators({ win, send });
 
   if (process.argv.includes('--selftest')) runSelfTest();
 }
@@ -770,6 +797,16 @@ function runSelfTest() {
         results.push('sites=' + lib.sites.length);
         const card = document.querySelector('.card-actions');
         results.push('cardButtons=' + (card ? card.querySelectorAll('button').length : 0));
+        // The window is frameless. If Windows never painted its controls into
+        // the reserved slot, the app has no close button — fail, don't ship.
+        const wco = navigator.windowControlsOverlay;
+        results.push('wco=' + (wco && wco.visible
+          ? Math.round(wco.getTitlebarAreaRect().width) + 'px'
+          : (document.querySelector('.win-controls') ? 'fallback' : 'MISSING')));
+        // Nothing may render at the 300x150 intrinsic size of an unsized <svg>.
+        const huge = [...document.querySelectorAll('svg')]
+          .filter(s => s.getBoundingClientRect().width > 120).length;
+        results.push('oversizedIcons=' + huge);
         const extracted = lib.sites.find(s => s.kind === 'extracted');
         if (extracted) {
           const pal = await window.snap.invoke('palette:scan', { dir: extracted.dir });
@@ -781,6 +818,7 @@ function runSelfTest() {
       })()`);
       log.info('selftest ipc:', health);
       if (/MISSING/.test(health)) failure = 'environment incomplete: ' + health;
+      if (!/oversizedIcons=0\b/.test(health)) failure = 'an icon rendered at its intrinsic size: ' + health;
 
       if (url) {
         log.info('selftest capturing', url);
@@ -803,6 +841,25 @@ function runSelfTest() {
 
         log.info('selftest capture status:', status);
         if (!/^Done/.test(status)) failure = status || 'capture never finished';
+      }
+
+      // Screenshot a specific surface instead of the landing view. A fixed set
+      // of names, not arbitrary script — enough to eyeball the states that only
+      // exist after a click.
+      const show = process.env.SLURP_SELFTEST_SHOW;
+      if (show) {
+        const clicks = {
+          options: ['#btnOptions'],
+          studio: ['#tab-studio'],
+          commands: ['#btnPalette'],
+          settings: ['#btnSettings'],
+        }[show];
+        if (!clicks) throw new Error(`Unknown SLURP_SELFTEST_SHOW: ${show}`);
+        await win.webContents.executeJavaScript(`(() => {
+          for (const sel of ${JSON.stringify(clicks)}) document.querySelector(sel).click();
+          return true;
+        })()`);
+        await sleep(700);
       }
 
       const img = await win.webContents.capturePage();
