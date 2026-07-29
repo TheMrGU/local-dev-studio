@@ -1,7 +1,10 @@
-# SiteSnap
+# SiteSlurp Studio
 
-Capture any website, extract it into editable files, and host it locally — built for the
-client-site-update workflow: scrape a client's existing site, restyle it locally, redeliver.
+**Website extractor & management, by [NightShyft Studios](https://siteslurp.com).**
+
+Slurp any website into editable files, host it locally, and manage every client site in one
+place — built for the client-site-update workflow: extract a client's existing site, restyle
+it locally, review it with on-page annotations, redeliver.
 
 ## Install
 
@@ -9,12 +12,12 @@ Grab one of the two builds and run it. Nothing else to install.
 
 | Download | Use it when |
 | --- | --- |
-| `SiteSnap-Setup-<version>.exe` | Normal install — Start-menu and desktop shortcuts, uninstall entry. Per-user, so no admin prompt. |
-| `SiteSnap-<version>-portable.exe` | Running from a USB stick or a locked-down machine. No install, no registry entries. |
+| `SiteSlurp-Setup-<version>.exe` | Normal install — Start-menu and desktop shortcuts, uninstall entry. Per-user, so no admin prompt. |
+| `SiteSlurp-<version>-portable.exe` | Running from a USB stick or a locked-down machine. No install, no registry entries. |
 
 **Requirements:** Windows 10/11 (x64) and a Chromium-based browser. Microsoft Edge ships with
 Windows, so that's almost always already satisfied. Chrome, Brave, Vivaldi, Opera and plain
-Chromium work too — SiteSnap finds whichever you have and lets you pick in Settings.
+Chromium work too — SiteSlurp finds whichever you have and lets you pick in Settings.
 
 You do **not** need Node.js, npm, or any command-line tools. The page-capture engine ships
 inside the app and runs on Electron's own runtime.
@@ -32,13 +35,13 @@ inside the app and runs on Electron's own runtime.
    `*.html` + `css/` (one file per unique style block) + `assets/images|fonts|media|misc/`,
    deduped by content hash across pages. Scroll-reveal content frozen at `opacity: 0` (its
    scripts having been stripped) is unhidden, so the page looks like it did live.
-3. **Fix videos** — the capture engine drops `<video>` sources; SiteSnap downloads the
+3. **Fix videos** — the capture engine drops `<video>` sources; SiteSlurp downloads the
    originals, wires them in locally, and adds `muted` so autoplay works.
 4. **Host** — one click serves any site on localhost and opens it at its real homepage (the
    page whose URL you captured), with Range support so video seeks and no-cache headers so your
    edits show on refresh. Multiple sites at once on different ports. Both the IPv4 and IPv6
    loopback are bound, so a stray server on the other stack can't shadow a hosted site — if
-   another process owns half a port, SiteSnap skips to the next one. The generated page list
+   another process owns half a port, SiteSlurp skips to the next one. The generated page list
    stays available via **⋯ → Open sitemap** (`/_index.html`).
 5. **Recolor** — scans the site's palette; click a swatch, pick a replacement, and it swaps
    that color across every css, html and svg file. Alpha and notation are preserved
@@ -49,7 +52,7 @@ inside the app and runs on Electron's own runtime.
 
 ## Library
 
-The library lists every capture folder under the captures root — `Documents\SiteSnap` by
+The library lists every capture folder under the captures root — `Documents\SiteSlurp` by
 default, or the existing `Desktop\Projects\Mockups\SiteReferences` folder if you already have
 one from the older `crawl.ps1` / `capture.ps1` / `extract.ps1` scripts.
 
@@ -72,7 +75,7 @@ the grid clean.
 Open **Help → Setup & diagnostics**, or click the status pills in the title bar. It reports the
 browser it found, the capture engine path, and whether the captures folder is writable.
 
-**Help → Open log file** opens `%APPDATA%\SiteSnap\logs\sitesnap.log`, which records every
+**Help → Open log file** opens `%APPDATA%\SiteSlurp Studio\logs\siteslurp.log`, which records every
 capture, failure and stack trace.
 
 | Symptom | Fix |
@@ -81,8 +84,8 @@ capture, failure and stack trace.
 | Site looks broken or half-loaded | Raise **Extra wait** in Advanced so lazy content finishes loading before the snapshot. |
 | A cookie banner covers everything | Leave **Strip cookie banners** on; for an unusual consent tool, delete the overlay element in the extracted HTML. |
 | Deep links 404 while hosting | Those pages were beyond the crawl depth and never got saved. Recapture with a higher depth. |
-| Hosting shows a completely different website | Another program is serving that port on the other network stack (a leftover `python -m http.server`, a dev server, …). SiteSnap now binds both loopbacks and skips such ports automatically — stop the other program, or just re-host and use the port SiteSnap reports. |
-| Port already in use | SiteSnap walks forward from the default port automatically; change the default in Settings if you want a different range. |
+| Hosting shows a completely different website | Another program is serving that port on the other network stack (a leftover `python -m http.server`, a dev server, …). SiteSlurp now binds both loopbacks and skips such ports automatically — stop the other program, or just re-host and use the port SiteSlurp reports. |
+| Port already in use | SiteSlurp walks forward from the default port automatically; change the default in Settings if you want a different range. |
 
 ## Development
 
@@ -98,7 +101,7 @@ npm run dist             # build installer + portable into dist\
 Before shipping a build, run the one check that covers everything:
 
 ```powershell
-node scripts/smoke.js dist\win-unpacked\SiteSnap.exe --capture
+node scripts/smoke.js "dist\win-unpacked\SiteSlurp Studio.exe" --capture
 ```
 
 That drives a real capture through the built exe's own UI and IPC — renderer → main → browser →

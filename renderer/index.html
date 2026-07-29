@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
-<title>SiteSnap</title>
+<title>SiteSlurp Studio</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -35,10 +35,23 @@
 
 <header class="topbar">
   <div class="brand">
-    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4.1 13.2c-.4.5 0 1.3.7 1.3H11l-1.8 7.2c-.2.7.8 1.2 1.3.6L19.9 10c.4-.5 0-1.3-.7-1.3H13l1.8-6.1c.2-.7-.8-1.2-1.3-.6Z"/></svg>
-    <h1>SiteSnap</h1>
-    <span class="tagline">capture &middot; extract &middot; host</span>
+    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+      <defs><mask id="markCut">
+        <rect width="32" height="32" rx="9" fill="#fff"/>
+        <path d="M16 6.4v8.8" stroke="#000" stroke-width="3.1" stroke-linecap="round"/>
+        <path d="M10.9 13.1 16 19.2l5.1-6.1" fill="none" stroke="#000" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M6.7 24.3c1.85-2.1 3.75-2.1 5.6 0s3.75 2.1 5.6 0 3.75-2.1 5.6 0" fill="none" stroke="#000" stroke-width="2.7" stroke-linecap="round"/>
+      </mask></defs>
+      <rect width="32" height="32" rx="9" fill="currentColor" mask="url(#markCut)"/>
+    </svg>
+    <h1>SiteSlurp <em>Studio</em></h1>
   </div>
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button class="tab on" id="tab-extractor" role="tab" aria-selected="true" aria-controls="view-extractor"
+            title="Extractor (Ctrl+1)"><span class="tick" aria-hidden="true"></span>Extractor</button>
+    <button class="tab" id="tab-studio" role="tab" aria-selected="false" aria-controls="view-studio"
+            title="Studio (Ctrl+2)"><span class="tick" aria-hidden="true"></span>Studio<span class="tab-count" id="tabStudioCount"></span></button>
+  </nav>
   <div class="topbar-right">
     <button id="envStatus" class="env" title="Setup &amp; diagnostics"></button>
     <button class="icon-btn" id="btnSettings" title="Settings (Ctrl+,)" aria-label="Settings"><svg><use href="#i-gear"/></svg></button>
@@ -46,6 +59,14 @@
 </header>
 
 <main>
+<section id="view-extractor" class="view" role="tabpanel" aria-labelledby="tab-extractor">
+  <div class="pane-head">
+    <p class="eyebrow"><span class="tick" aria-hidden="true"></span> Extractor</p>
+    <h2 class="pane-title">Paste a link. Slurp the whole site.</h2>
+    <p class="pane-sub">React, Next, anything — rendered in a real browser, then unpacked into
+      clean editable files you own.</p>
+  </div>
+
   <section class="capture-panel">
     <form id="captureForm" autocomplete="off">
       <div class="url-row">
@@ -90,6 +111,23 @@
     </div>
   </section>
 
+  <section id="recentWrap" class="recent hidden">
+    <div class="recent-head">
+      <h3>Latest out of the extractor</h3>
+      <button id="btnGoStudio" class="link-btn">Open Studio &rarr;</button>
+    </div>
+    <div id="recentList"></div>
+  </section>
+</section>
+
+<section id="view-studio" class="view hidden" role="tabpanel" aria-labelledby="tab-studio">
+  <div class="pane-head">
+    <p class="eyebrow"><span class="tick" aria-hidden="true"></span> Studio</p>
+    <h2 class="pane-title">Every site you manage, in one place.</h2>
+    <p class="pane-sub">Host any project on its own port, edit with live reload, and turn on-page
+      feedback into a spec an agent can build from. Drop a folder anywhere to add it.</p>
+  </div>
+
   <section id="serversStrip" class="servers hidden">
     <span class="servers-label">Hosting</span>
     <div id="serverChips"></div>
@@ -98,7 +136,7 @@
 
   <section class="library">
     <div class="lib-head">
-      <h2>Library</h2>
+      <h3>Library <span id="libCount" class="lib-count"></span></h3>
       <div class="search">
         <svg aria-hidden="true"><use href="#i-search"/></svg>
         <input id="libSearch" type="text" placeholder="Filter…" spellcheck="false" aria-label="Filter captures">
@@ -115,6 +153,7 @@
     <div id="grid" class="grid"></div>
     <div id="empty" class="empty hidden"></div>
   </section>
+</section>
 </main>
 
 <aside id="paletteDrawer" class="drawer hidden" aria-label="Palette">
@@ -164,7 +203,7 @@
       <summary>Advanced</summary>
       <label>Page-capture engine <span id="setSfStatus" class="mini"></span>
         <input id="setSf" type="text" spellcheck="false" placeholder="bundled">
-        <span class="mini">Leave empty to use the copy that ships with SiteSnap.</span>
+        <span class="mini">Leave empty to use the copy that ships with SiteSlurp.</span>
       </label>
     </details>
     <div class="modal-actions">
@@ -199,9 +238,18 @@
 
 <div id="aboutModal" class="modal hidden">
   <div class="modal-card about">
-    <svg class="mark big" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4.1 13.2c-.4.5 0 1.3.7 1.3H11l-1.8 7.2c-.2.7.8 1.2 1.3.6L19.9 10c.4-.5 0-1.3-.7-1.3H13l1.8-6.1c.2-.7-.8-1.2-1.3-.6Z"/></svg>
-    <h3>SiteSnap <span id="aboutVersion" class="mini"></span></h3>
-    <p class="modal-hint">Capture any website, extract it into editable files, host it locally.</p>
+    <svg class="mark big" viewBox="0 0 32 32" aria-hidden="true">
+      <defs><mask id="markCutBig">
+        <rect width="32" height="32" rx="9" fill="#fff"/>
+        <path d="M16 6.4v8.8" stroke="#000" stroke-width="3.1" stroke-linecap="round"/>
+        <path d="M10.9 13.1 16 19.2l5.1-6.1" fill="none" stroke="#000" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M6.7 24.3c1.85-2.1 3.75-2.1 5.6 0s3.75 2.1 5.6 0 3.75-2.1 5.6 0" fill="none" stroke="#000" stroke-width="2.7" stroke-linecap="round"/>
+      </mask></defs>
+      <rect width="32" height="32" rx="9" fill="currentColor" mask="url(#markCutBig)"/>
+    </svg>
+    <h3>SiteSlurp Studio <span id="aboutVersion" class="mini"></span></h3>
+    <p class="modal-hint">Slurp any website into editable files, host it locally, manage every client site in one place.</p>
+    <p class="modal-hint mini">siteslurp.com</p>
     <dl id="aboutDetails" class="about-details"></dl>
     <div class="modal-actions">
       <button id="aboutNotices" class="small">Licenses</button>

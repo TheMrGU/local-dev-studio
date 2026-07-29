@@ -1,4 +1,4 @@
-/* SiteSnap renderer */
+/* SiteSlurp renderer */
 const $ = sel => document.querySelector(sel);
 const invoke = (channel, data) => window.snap.invoke(channel, data);
 
@@ -7,6 +7,7 @@ const state = {
   env: null,
   settings: null,
   busy: false,
+  tab: 'extractor',
   paletteDir: null,
   paletteFrom: null,
   filter: '',
@@ -14,6 +15,31 @@ const state = {
   runTimer: null,
   zipToast: null,
 };
+
+/* ---------- tabs ----------
+   Extractor owns capturing and the run log; Studio owns hosting and the
+   library. Anything that starts a run pulls the user back to Extractor so the
+   log is never running behind a hidden tab. */
+const TABS = ['extractor', 'studio'];
+
+function setTab(name, { persist = true } = {}) {
+  if (!TABS.includes(name)) name = 'extractor';
+  state.tab = name;
+  for (const tab of TABS) {
+    const on = tab === name;
+    const button = document.getElementById('tab-' + tab);
+    button.classList.toggle('on', on);
+    button.setAttribute('aria-selected', String(on));
+    document.getElementById('view-' + tab).classList.toggle('hidden', !on);
+  }
+  window.scrollTo({ top: 0 });
+  if (persist) invoke('settings:set', { tab: name }).catch(() => {});
+}
+
+for (const tab of TABS) {
+  document.getElementById('tab-' + tab).addEventListener('click', () => setTab(tab));
+}
+$('#btnGoStudio').addEventListener('click', () => setTab('studio'));
 
 /* ---------- toasts ---------- */
 function toast(message, { kind = '', action = null, timeout = 5000 } = {}) {
@@ -74,14 +100,14 @@ function problems() {
       title: 'No Chromium browser found',
       detail: env.browser.installed.length
         ? 'Pick one in Settings.'
-        : 'SiteSnap drives a real browser so React and other JS-heavy sites render before they are saved. Install Microsoft Edge or Google Chrome, then reopen this dialog.',
+        : 'SiteSlurp drives a real browser so React and other JS-heavy sites render before they are saved. Install Microsoft Edge or Google Chrome, then reopen this dialog.',
     });
   } else {
     list.push({ ok: true, title: `Browser: ${env.browser.name}`, detail: env.browser.path });
   }
   list.push(env.singleFile.ok
     ? { ok: true, title: `Capture engine ready${env.singleFile.bundled ? ' (bundled)' : ''}`, detail: env.singleFile.path }
-    : { ok: false, title: 'Capture engine missing', detail: 'Reinstall SiteSnap, or point Settings → Advanced at a single-file-cli install.' });
+    : { ok: false, title: 'Capture engine missing', detail: 'Reinstall SiteSlurp, or point Settings → Advanced at a single-file-cli install.' });
   list.push(env.capturesRoot.ok
     ? { ok: true, title: 'Captures folder writable', detail: env.capturesRoot.path }
     : { ok: false, title: 'Captures folder is not writable', detail: `${env.capturesRoot.path} — pick another folder in Settings.` });
@@ -90,9 +116,9 @@ function problems() {
 
 function openDoctor(firstRun = false) {
   const list = problems();
-  $('#doctorTitle').textContent = firstRun ? 'Welcome to SiteSnap' : 'Setup & diagnostics';
+  $('#doctorTitle').textContent = firstRun ? 'Welcome to SiteSlurp Studio' : 'Setup & diagnostics';
   $('#doctorIntro').textContent = firstRun
-    ? 'Paste any URL and SiteSnap saves the whole site, unpacks it into editable files, and hosts it on localhost. Here is what it found on this machine:'
+    ? 'Paste any URL and SiteSlurp saves the whole site, unpacks it into editable files, and hosts it on localhost. Here is what it found on this machine:'
     : '';
   const ul = $('#doctorList');
   ul.innerHTML = '';
@@ -263,6 +289,7 @@ $('#btnCancel').addEventListener('click', async () => {
 });
 
 function startRunPanel(message) {
+  setTab('extractor');   // extracting from a Studio card still shows its log
   $('#runPanel').classList.remove('hidden');
   $('#runLog').textContent = '';
   $('#runSpinner').className = 'spinner';
@@ -309,6 +336,7 @@ window.snap.on('zip:progress', ({ done, total }) => {
 window.snap.on('run:busy', ({ busy }) => {
   state.busy = busy;
   $('#btnCapture').disabled = busy;
+  $('#tab-extractor').classList.toggle('busy', busy);
 });
 
 window.snap.on('run:done', async ({ ok, dir, stats, error, canceled, seconds }) => {
@@ -621,6 +649,63 @@ function visibleSites() {
   return sites;
 }
 
+/* The Extractor tab's own short list: the last few things this app produced,
+   with the one action each of them is waiting for. Local folders belong to
+   Studio, so they stay out of it. */
+function renderRecent() {
+  const rows = state.library.sites
+    .filter(site => !site.missing && (site.kind === 'raw' || site.kind === 'extracted'))
+    .filter(site => !(site.kind === 'raw' && site.hasExtracted))
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, 4);
+
+  $('#recentWrap').classList.toggle('hidden', !rows.length);
+  const list = $('#recentList');
+  list.innerHTML = '';
+  for (const site of rows) {
+    const row = document.createElement('div');
+    row.className = 'recent-row';
+
+    const info = document.createElement('div');
+    info.className = 'recent-info';
+    const name = document.createElement('div');
+    name.className = 'recent-name';
+    name.textContent = site.name;
+    const meta = document.createElement('div');
+    meta.className = 'recent-meta';
+    if (site.port) {
+      meta.innerHTML = '<span class="port"></span>';
+      meta.querySelector('.port').textContent = `localhost:${site.port}`;
+      meta.append(` · ${site.pages} page${site.pages === 1 ? '' : 's'} · ${fileSize(site.sizeBytes)}`);
+    } else {
+      meta.textContent = site.kind === 'raw'
+        ? `raw snapshot · ${fileSize(site.sizeBytes)} · not extracted yet`
+        : `${site.pages} page${site.pages === 1 ? '' : 's'} · ${fileSize(site.sizeBytes)}`;
+    }
+    info.appendChild(name);
+    info.appendChild(meta);
+    row.appendChild(info);
+
+    if (site.kind === 'raw') {
+      row.appendChild(textButton('unpack', 'Extract', 'primary', async () => {
+        startRunPanel('Extracting…');
+        try {
+          await invoke('extract:run', { dir: site.dir });
+        } catch (err) {
+          stopRunPanel('fail', err.message);
+          throw err;
+        }
+      }));
+    } else if (site.port) {
+      row.appendChild(textButton('open', 'Open', 'stop', () =>
+        invoke('open:url', { url: `http://localhost:${site.port}/` })));
+    } else {
+      row.appendChild(textButton('globe', 'Host', 'primary', () => hostSite(site.dir)));
+    }
+    list.appendChild(row);
+  }
+}
+
 function renderLibrary() {
   closeMenu(); // the popover's card is about to be re-rendered
   const sites = visibleSites();
@@ -633,10 +718,14 @@ function renderLibrary() {
   if (!sites.length) {
     empty.textContent = state.library.sites.length
       ? 'Nothing matches that filter.'
-      : 'Nothing here yet — paste a URL above to capture a site, or drop a folder to add your own.';
+      : 'Nothing here yet — capture a site in the Extractor tab, or drop a folder to add your own.';
   }
+  $('#libCount').textContent = sites.length || '';
 
   const hosted = state.library.sites.filter(s => s.port);
+  $('#tabStudioCount').textContent = state.library.sites.length || '';
+  $('#tab-studio').classList.toggle('busy', hosted.length > 0);
+  renderRecent();
   $('#serversStrip').classList.toggle('hidden', !hosted.length);
   const chips = $('#serverChips');
   chips.innerHTML = '';
@@ -846,7 +935,8 @@ window.snap.on('ui:refresh', refreshLibrary);
 window.snap.on('ui:settings', openSettings);
 window.snap.on('ui:doctor', () => refreshEnv().then(() => openDoctor()));
 window.snap.on('ui:about', openAbout);
-window.snap.on('ui:focus-url', () => { $('#url').focus(); $('#url').select(); });
+window.snap.on('ui:tab', name => setTab(name));
+window.snap.on('ui:focus-url', () => { setTab('extractor'); $('#url').focus(); $('#url').select(); });
 window.snap.on('env:changed', () => refreshEnv());
 
 document.addEventListener('keydown', e => {
@@ -857,8 +947,13 @@ document.addEventListener('keydown', e => {
     }
   }
   if (e.key === 'Enter' && !$('#settingsModal').classList.contains('hidden')) $('#setSave').click();
+  if ((e.ctrlKey || e.metaKey) && (e.key === '1' || e.key === '2')) {
+    e.preventDefault();
+    setTab(e.key === '1' ? 'extractor' : 'studio');
+  }
   if (e.key === '/' && document.activeElement === document.body) {
     e.preventDefault();
+    setTab('studio');
     $('#libSearch').focus();
   }
 });
@@ -878,12 +973,13 @@ for (const id of ['settingsModal', 'doctorModal', 'aboutModal', 'historyModal'])
     applyRememberedOptions(settings);
     $('#libSort').value = settings.sort;
     $('#libShowRaw').checked = settings.showRaw;
+    setTab(settings.tab, { persist: false });
     await refreshLibrary();
     if (!settings.seenWelcome) {
       openDoctor(true);
       invoke('settings:set', { seenWelcome: true }).catch(() => {});
     }
-    $('#url').focus();
+    if (state.tab === 'extractor') $('#url').focus();
   } catch (err) {
     failed(err);
   }

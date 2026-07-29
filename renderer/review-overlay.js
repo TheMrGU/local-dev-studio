@@ -1,8 +1,8 @@
-/* SiteSnap Review Mode overlay.
+/* SiteSlurp Review Mode overlay.
  *
  * Injected at serve time into pages hosted in review mode. Everything lives in
  * a closed shadow root so the host page's CSS can't touch it and ours can't
- * leak out. Talks to the app over same-origin HTTP (/__sitesnap__/review/).
+ * leak out. Talks to the app over same-origin HTTP (/__siteslurp__/review/).
  * The page being reviewed is arbitrary third-party markup — never trust it,
  * never modify it; we only read geometry and styles.
  */
@@ -11,7 +11,7 @@
   if (window.__ssReviewLoaded) return;
   window.__ssReviewLoaded = true;
 
-  const API = '/__sitesnap__/review/';
+  const API = '/__siteslurp__/review/';
   const state = {
     config: null,          // GET state payload
     annotating: true,      // select-mode toggle
@@ -131,79 +131,97 @@
   const host = document.createElement('div');
   host.id = '__ss-review-host';
   const root = host.attachShadow({ mode: 'open' });
-  const ACCENT = '#ff3e00';
+  // Same scheme as the Studio window: near-black surfaces, gray type, acid for
+  // the live thing. Shadow DOM keeps all of it off the page being reviewed.
+  const ACCENT = '#CDFF3C';
+  const INK = '#07070A';
+  const SURFACE = '#0F0F12';
+  const RAISED = '#17171C';
+  const LINE = 'rgba(255,255,255,0.14)';
+  const GRAY = '#A2A2AC';
+  const DIM = '#74747E';
 
   root.innerHTML = `<style>
     :host { all: initial; }
     * { box-sizing: border-box; font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
     .hl { position: fixed; pointer-events: none; z-index: 2147483600;
-          border: 1.5px solid ${ACCENT}; background: rgba(255,62,0,0.06); border-radius: 2px; display: none; }
-    .hl-tag { position: fixed; pointer-events: none; z-index: 2147483601; background: #111; color: #fff;
+          border: 1.5px solid ${ACCENT}; background: rgba(205,255,60,0.10); border-radius: 2px; display: none; }
+    .hl-tag { position: fixed; pointer-events: none; z-index: 2147483601; background: ${INK}; color: ${ACCENT};
           font-size: 11px; padding: 2px 7px; border-radius: 4px; display: none; white-space: nowrap; font-family: Consolas, monospace; }
     .sel { position: fixed; pointer-events: none; z-index: 2147483599;
-          border: 2px solid ${ACCENT}; border-radius: 2px; background: rgba(255,62,0,0.04); }
+          border: 2px solid ${ACCENT}; border-radius: 2px; background: rgba(205,255,60,0.07); }
     .rgn { position: absolute; pointer-events: none; z-index: 2147483599;
-          border: 1.5px dashed ${ACCENT}; background: rgba(255,62,0,0.05); }
+          border: 1.5px dashed ${ACCENT}; background: rgba(205,255,60,0.08); }
     .bar { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 2147483646;
-          display: flex; gap: 4px; align-items: center; background: rgba(17,17,17,0.94); color: #eee;
-          padding: 8px 10px; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.35);
-          font-size: 12.5px; backdrop-filter: blur(10px); }
-    .bar .brand { color: ${ACCENT}; font-weight: 700; margin: 0 6px 0 2px; letter-spacing: .02em; }
-    .bar button { background: none; border: none; color: #ddd; font-size: 12.5px; padding: 6px 9px;
+          display: flex; gap: 4px; align-items: center; background: rgba(8,8,10,0.92); color: ${GRAY};
+          border: 1px solid ${LINE};
+          padding: 8px 10px; border-radius: 14px; box-shadow: 0 14px 44px rgba(0,0,0,0.55);
+          font-size: 12.5px; backdrop-filter: blur(14px) saturate(140%); }
+    .bar .brand { color: ${ACCENT}; font-weight: 700; margin: 0 6px 0 2px; letter-spacing: -.02em; }
+    .bar button { background: none; border: none; color: ${GRAY}; font-size: 12.5px; padding: 6px 9px;
           border-radius: 8px; cursor: pointer; }
-    .bar button:hover { background: rgba(255,255,255,0.1); }
-    .bar button.on { background: ${ACCENT}; color: #fff; }
-    .bar .sep { width: 1px; height: 18px; background: rgba(255,255,255,0.16); margin: 0 3px; }
-    .bar .count { color: #999; padding: 0 6px; }
-    .panel { position: fixed; z-index: 2147483647; width: 330px; background: #fff; color: #1d1d1f;
-          border-radius: 14px; box-shadow: 0 24px 70px rgba(0,0,0,0.3); padding: 14px; }
-    .panel h3 { margin: 0 0 2px; font-size: 13px; font-weight: 650; }
-    .panel .sel-label { font-family: Consolas, monospace; font-size: 11px; color: #86868b;
+    .bar button:hover { background: rgba(255,255,255,0.09); color: #fff; }
+    .bar button.on { background: ${ACCENT}; color: ${INK}; font-weight: 600; }
+    .bar .sep { width: 1px; height: 18px; background: ${LINE}; margin: 0 3px; }
+    .bar .count { color: ${DIM}; padding: 0 6px; font-family: Consolas, monospace; }
+    .panel { position: fixed; z-index: 2147483647; width: 330px; background: ${SURFACE}; color: ${GRAY};
+          border: 1px solid ${LINE};
+          border-radius: 14px; box-shadow: 0 24px 70px rgba(0,0,0,0.6); padding: 14px; }
+    .panel h3 { margin: 0 0 2px; font-size: 13px; font-weight: 600; color: #fff; letter-spacing: -.02em; }
+    .panel .sel-label { font-family: Consolas, monospace; font-size: 11px; color: ${DIM};
           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 10px; }
     .row { display: flex; gap: 4px; margin: 6px 0; flex-wrap: wrap; }
-    .rate { flex: 1; min-width: 24px; height: 26px; border: 1px solid #d2d2d7; background: #fff; border-radius: 6px;
-          font-size: 11.5px; cursor: pointer; padding: 0; }
-    .rate.on { background: #111; color: #fff; border-color: #111; }
-    .chip { border: 1px solid #d2d2d7; background: #fff; border-radius: 999px; font-size: 11.5px;
+    .rate { flex: 1; min-width: 24px; height: 26px; border: 1px solid ${LINE}; background: ${RAISED}; color: ${GRAY};
+          border-radius: 6px; font-size: 11.5px; cursor: pointer; padding: 0; }
+    .rate:hover { border-color: rgba(255,255,255,0.3); color: #fff; }
+    .rate.on { background: #fff; color: ${INK}; border-color: #fff; font-weight: 600; }
+    .chip { border: 1px solid ${LINE}; background: ${RAISED}; color: ${GRAY}; border-radius: 999px; font-size: 11.5px;
           padding: 4px 10px; cursor: pointer; }
-    .chip.on { background: #111; color: #fff; border-color: #111; }
-    .chip.sev-on { background: ${ACCENT}; color: #fff; border-color: ${ACCENT}; }
-    textarea { width: 100%; border: 1px solid #d2d2d7; border-radius: 8px; padding: 7px 9px; font-size: 12.5px;
-          resize: vertical; min-height: 44px; margin-top: 2px; }
-    textarea:focus { outline: 2px solid #111; border-color: transparent; }
-    .lbl { font-size: 11px; font-weight: 600; color: #6e6e73; margin-top: 8px; display: flex; justify-content: space-between; align-items: center; }
+    .chip:hover { border-color: rgba(255,255,255,0.3); color: #fff; }
+    .chip.on { background: #fff; color: ${INK}; border-color: #fff; font-weight: 600; }
+    .chip.sev-on { background: ${ACCENT}; color: ${INK}; border-color: ${ACCENT}; font-weight: 600; }
+    textarea { width: 100%; border: 1px solid ${LINE}; border-radius: 8px; padding: 7px 9px; font-size: 12.5px;
+          background: ${RAISED}; color: #fff; resize: vertical; min-height: 44px; margin-top: 2px; }
+    textarea::placeholder { color: #55555E; }
+    textarea:focus { outline: 2px solid ${ACCENT}; outline-offset: 1px; border-color: transparent; }
+    .lbl { font-size: 11px; font-weight: 600; color: ${DIM}; margin-top: 8px; display: flex; justify-content: space-between; align-items: center; }
     .mic { border: none; background: none; cursor: pointer; font-size: 13px; padding: 0 4px; }
     .mic.rec { color: ${ACCENT}; }
     .actions { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
-    .save { background: #111; color: #fff; border: none; border-radius: 8px; padding: 8px 16px;
+    .save { background: ${ACCENT}; color: ${INK}; border: none; border-radius: 999px; padding: 8px 18px;
           font-size: 12.5px; font-weight: 600; cursor: pointer; }
-    .save:disabled { opacity: .4; cursor: default; }
-    .ghost { background: none; border: none; color: #6e6e73; font-size: 12.5px; cursor: pointer; padding: 8px 6px; }
-    .err { color: #c62828; font-size: 11.5px; margin-top: 8px; display: none; }
+    .save:hover:not(:disabled) { background: #fff; }
+    .save:disabled { opacity: .38; cursor: default; }
+    .ghost { background: none; border: none; color: ${DIM}; font-size: 12.5px; cursor: pointer; padding: 8px 6px; }
+    .ghost:hover { color: #fff; }
+    .err { color: #FF6257; font-size: 11.5px; margin-top: 8px; display: none; }
     .toast { position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 2147483647;
-          background: #111; color: #fff; font-size: 12.5px; padding: 10px 16px; border-radius: 10px;
-          display: flex; gap: 12px; align-items: center; box-shadow: 0 10px 40px rgba(0,0,0,0.35); }
-    .toast button { background: none; border: none; color: ${ACCENT}; font-weight: 650; cursor: pointer; font-size: 12.5px; }
-    .modal { position: fixed; inset: 0; z-index: 2147483647; background: rgba(0,0,0,0.4);
+          background: ${RAISED}; color: ${GRAY}; border: 1px solid ${LINE}; font-size: 12.5px; padding: 10px 16px; border-radius: 12px;
+          display: flex; gap: 12px; align-items: center; box-shadow: 0 14px 44px rgba(0,0,0,0.5); }
+    .toast button { background: none; border: none; color: ${ACCENT}; font-weight: 600; cursor: pointer; font-size: 12.5px; }
+    .modal { position: fixed; inset: 0; z-index: 2147483647; background: rgba(4,4,6,0.68);
+          backdrop-filter: blur(6px);
           display: flex; align-items: center; justify-content: center; }
-    .modal-card { width: 360px; max-height: 70vh; overflow: auto; background: #fff; border-radius: 14px; padding: 16px; color: #1d1d1f; }
-    .modal-card h3 { margin: 0 0 10px; font-size: 14px; }
-    .proj { display: block; width: 100%; text-align: left; padding: 9px 10px; border: 1px solid #e5e5ea;
-          background: #fff; border-radius: 8px; margin-bottom: 6px; cursor: pointer; font-size: 13px; }
-    .proj:hover { border-color: #111; }
-    .proj .kind { color: #86868b; font-size: 11px; margin-left: 6px; }
-    .banner { position: fixed; top: 0; left: 0; right: 0; z-index: 2147483646; background: ${ACCENT}; color: #fff;
+    .modal-card { width: 360px; max-height: 70vh; overflow: auto; background: ${SURFACE}; border: 1px solid ${LINE};
+          border-radius: 16px; padding: 16px; color: ${GRAY}; box-shadow: 0 30px 80px rgba(0,0,0,0.62); }
+    .modal-card h3 { margin: 0 0 10px; font-size: 14px; color: #fff; font-weight: 600; letter-spacing: -.02em; }
+    .proj { display: block; width: 100%; text-align: left; padding: 9px 10px; border: 1px solid ${LINE};
+          background: ${RAISED}; color: #fff; border-radius: 8px; margin-bottom: 6px; cursor: pointer; font-size: 13px; }
+    .proj:hover { border-color: ${ACCENT}; }
+    .proj .kind { color: ${DIM}; font-size: 11px; margin-left: 6px; }
+    .banner { position: fixed; top: 0; left: 0; right: 0; z-index: 2147483646; background: ${ACCENT}; color: ${INK};
           font-size: 13px; font-weight: 600; text-align: center; padding: 9px; }
     .pin { position: fixed; z-index: 2147483645; width: 21px; height: 21px; border-radius: 50%;
-          background: ${ACCENT}; color: #fff; font-size: 10.5px; font-weight: 700; border: 2px solid #fff;
-          box-shadow: 0 2px 8px rgba(0,0,0,0.35); cursor: pointer; padding: 0; line-height: 17px; text-align: center; }
-    .pin.resolved { background: #23a55a; }
-    .pin-why { font-size: 12.5px; margin: 8px 0 0; }
-    .pin-want { font-size: 12.5px; margin: 4px 0 0; color: #6e6e73; }
-    .pin-res { font-size: 12.5px; font-weight: 650; color: #23a55a; margin: 8px 0 0; }
+          background: ${ACCENT}; color: ${INK}; font-size: 10.5px; font-weight: 700; border: 2px solid ${INK};
+          box-shadow: 0 2px 10px rgba(0,0,0,0.5); cursor: pointer; padding: 0; line-height: 17px; text-align: center; }
+    .pin.resolved { background: #3A3A43; color: ${GRAY}; }
+    .pin-why { font-size: 12.5px; margin: 8px 0 0; color: #fff; }
+    .pin-want { font-size: 12.5px; margin: 4px 0 0; color: ${DIM}; }
+    .pin-res { font-size: 12.5px; font-weight: 600; color: ${ACCENT}; margin: 8px 0 0; }
     .anchor-row { display: flex; gap: 7px; align-items: center; font-size: 12px; margin-top: 10px; cursor: pointer; }
+    .anchor-row input[type="checkbox"] { accent-color: ${ACCENT}; }
     .orphan-row { display: flex; justify-content: space-between; gap: 8px; align-items: center;
-          padding: 8px 0; border-bottom: 1px solid #e5e5ea; font-size: 12.5px; }
+          padding: 8px 0; border-bottom: 1px solid ${LINE}; font-size: 12.5px; }
   </style>`;
 
   const el = (tag, cls, text) => {

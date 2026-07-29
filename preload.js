@@ -22,7 +22,7 @@ const INVOKE = new Set([
 const EVENTS = new Set([
   'run:log', 'run:status', 'run:progress', 'run:done', 'run:busy',
   'zip:progress', 'env:changed', 'review:exported', 'review:promote',
-  'ui:refresh', 'ui:settings', 'ui:focus-url', 'ui:doctor', 'ui:about',
+  'ui:refresh', 'ui:settings', 'ui:focus-url', 'ui:doctor', 'ui:about', 'ui:tab',
 ]);
 
 // Electron wraps handler errors as "Error invoking remote method 'x': Error: real

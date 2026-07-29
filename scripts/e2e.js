@@ -29,7 +29,7 @@ if (!process.versions.electron) {
   return;
 }
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'sitesnap-e2e-'));
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'siteslurp-e2e-'));
 require.cache[require.resolve('electron')] = {
   id: 'electron',
   filename: require.resolve('electron'),

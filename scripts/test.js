@@ -1,4 +1,4 @@
-/* Plain-node checks for the parts of SiteSnap that don't need a window.
+/* Plain-node checks for the parts of SiteSlurp that don't need a window.
  * Run with: npm test
  */
 'use strict';
@@ -9,7 +9,7 @@ const http = require('http');
 const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'sitesnap-test-'));
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'siteslurp-test-'));
 
 // Some modules pull in electron for app paths; stub it before they load.
 require.cache[require.resolve('electron')] = {
@@ -165,7 +165,7 @@ async function paletteTests() {
     const result = applyColor(dir, '1,2,3', '#ffffff');
     eq(result.replaced, 0);
     eq(result.undoId, null);
-    ok(!fs.existsSync(path.join(dir, '.sitesnap')) || !fs.readdirSync(path.join(dir, '.sitesnap', 'undo')).length,
+    ok(!fs.existsSync(path.join(dir, '.siteslurp')) || !fs.readdirSync(path.join(dir, '.siteslurp', 'undo')).length,
       'no empty snapshot left behind');
   });
 
@@ -250,11 +250,11 @@ async function zipTests() {
 
   const src = scratch('zip-src');
   fs.mkdirSync(path.join(src, 'css'), { recursive: true });
-  fs.mkdirSync(path.join(src, '.sitesnap'), { recursive: true });
+  fs.mkdirSync(path.join(src, '.siteslurp'), { recursive: true });
   fs.writeFileSync(path.join(src, 'index.html'), '<h1>hello</h1>'.repeat(200));
   fs.writeFileSync(path.join(src, 'css', 'a.css'), 'body{color:red}');
   fs.writeFileSync(path.join(src, 'binary.bin'), Buffer.from([0, 1, 2, 3, 255, 254]));
-  fs.writeFileSync(path.join(src, '.sitesnap', 'secret.txt'), 'should not be zipped');
+  fs.writeFileSync(path.join(src, '.siteslurp', 'secret.txt'), 'should not be zipped');
 
   const zipPath = path.join(TMP, 'out.zip');
 
@@ -273,7 +273,7 @@ async function zipTests() {
       `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${dest}' -Force`], { windowsHide: true });
     eq(fs.readFileSync(path.join(dest, 'css', 'a.css'), 'utf8'), 'body{color:red}');
     eq([...fs.readFileSync(path.join(dest, 'binary.bin'))], [0, 1, 2, 3, 255, 254]);
-    ok(!fs.existsSync(path.join(dest, '.sitesnap')), 'dot-folder stayed out');
+    ok(!fs.existsSync(path.join(dest, '.siteslurp')), 'dot-folder stayed out');
   });
 
   await check('rejects an empty folder', () => throws(() => zipFolder(scratch('zip-empty'), path.join(TMP, 'e.zip'))));
@@ -285,10 +285,10 @@ async function serverTests() {
 
   const site = scratch('srv-site');
   fs.mkdirSync(path.join(site, 'assets'), { recursive: true });
-  fs.mkdirSync(path.join(site, '.sitesnap'), { recursive: true });
+  fs.mkdirSync(path.join(site, '.siteslurp'), { recursive: true });
   fs.writeFileSync(path.join(site, 'index.html'), '<h1>home</h1>');
   fs.writeFileSync(path.join(site, 'assets', 'clip.mp4'), Buffer.from('0123456789'));
-  fs.writeFileSync(path.join(site, '.sitesnap', 'secret.txt'), 'nope');
+  fs.writeFileSync(path.join(site, '.siteslurp', 'secret.txt'), 'nope');
   // A sibling folder whose name shares the site's prefix — the classic prefix-check bypass.
   // The sentinel is deliberately unlike the request path, since the 404 page echoes that back.
   const SENTINEL = 'ESCAPED-THE-SITE-ROOT';
@@ -331,7 +331,7 @@ async function serverTests() {
     });
 
     await check('hides internal dot-folders', async () => {
-      const res = await get('/.sitesnap/secret.txt');
+      const res = await get('/.siteslurp/secret.txt');
       eq(res.status, 404);
     });
 
@@ -372,6 +372,14 @@ async function entryTests() {
     const dir = scratch('entry-manifest');
     fs.writeFileSync(path.join(dir, '_index.html'), 'sitemap');
     fs.writeFileSync(path.join(dir, 'zzz.html'), 'home');
+    fs.writeFileSync(path.join(dir, 'siteslurp.json'), JSON.stringify({ entry: 'zzz.html' }));
+    eq(resolveEntry(dir), 'zzz.html');
+  });
+
+  await check('a pre-rename sitesnap.json manifest still resolves the entry', () => {
+    const dir = scratch('entry-legacy-manifest');
+    fs.writeFileSync(path.join(dir, '_index.html'), 'sitemap');
+    fs.writeFileSync(path.join(dir, 'zzz.html'), 'home');
     fs.writeFileSync(path.join(dir, 'sitesnap.json'), JSON.stringify({ entry: 'zzz.html' }));
     eq(resolveEntry(dir), 'zzz.html');
   });
@@ -381,7 +389,7 @@ async function entryTests() {
     fs.writeFileSync(path.join(dir, '_index.html'), 'sitemap');
     fs.writeFileSync(path.join(dir, '_en.html'), 'home');
     fs.writeFileSync(path.join(dir, '_en_about.html'), 'about');
-    fs.writeFileSync(path.join(dir, 'sitesnap.json'),
+    fs.writeFileSync(path.join(dir, 'siteslurp.json'),
       JSON.stringify({ url: 'https://www.example.com/en?ref=x' }));
     eq(resolveEntry(dir), '_en.html');
   });
@@ -401,7 +409,7 @@ async function entryTests() {
     const dir = scratch('entry-served');
     fs.writeFileSync(path.join(dir, '_index.html'), '<h1>sitemap</h1>');
     fs.writeFileSync(path.join(dir, '_en.html'), '<h1>the actual site</h1>');
-    fs.writeFileSync(path.join(dir, 'sitesnap.json'), JSON.stringify({ url: 'https://x.test/en' }));
+    fs.writeFileSync(path.join(dir, 'siteslurp.json'), JSON.stringify({ url: 'https://x.test/en' }));
     const server = http.createServer(makeHandler(dir));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     try {
@@ -583,7 +591,7 @@ async function liveReloadTests() {
 
   // Open the SSE stream and hand back a way to await the next parsed event.
   const openSse = port => new Promise((resolve, reject) => {
-    const req = http.get({ host: '127.0.0.1', port, path: '/__sitesnap__/events' }, res => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/__siteslurp__/events' }, res => {
       const events = [];
       const waiters = [];
       let buffer = '';
@@ -621,7 +629,7 @@ async function liveReloadTests() {
   await check('inject lands before </body> and degrades to append', () => {
     const lr = new LiveReload('.');
     const injected = lr.inject(Buffer.from('<html><body><h1>x</h1></body></html>')).toString();
-    ok(/<script src="\/__sitesnap__\/livereload\.js" defer><\/script><\/body>/.test(injected),
+    ok(/<script src="\/__siteslurp__\/livereload\.js" defer><\/script><\/body>/.test(injected),
       'before </body>: ' + injected);
     const headless = lr.inject(Buffer.from('just a fragment')).toString();
     ok(headless.startsWith('just a fragment') && headless.includes('livereload.js'), 'appended: ' + headless);
@@ -641,11 +649,11 @@ async function liveReloadTests() {
   try {
     await check('serves injected HTML while the disk stays untouched', async () => {
       const res = await get(port, '/');
-      ok(res.body.toString().includes('/__sitesnap__/livereload.js'), 'script tag served');
+      ok(res.body.toString().includes('/__siteslurp__/livereload.js'), 'script tag served');
       eq(parseInt(res.headers['content-length'], 10), res.body.length, 'content-length matches: ');
       eq(fs.readFileSync(path.join(site, 'index.html'), 'utf8'), pageOnDisk, 'disk byte-exact: ');
-      eq((await get(port, '/__sitesnap__/livereload.js')).status, 200);
-      ok((await get(port, '/__sitesnap__/livereload.js')).headers['content-type'].includes('javascript'),
+      eq((await get(port, '/__siteslurp__/livereload.js')).status, 200);
+      ok((await get(port, '/__siteslurp__/livereload.js')).headers['content-type'].includes('javascript'),
         'client script is javascript');
     });
 
@@ -676,8 +684,8 @@ async function liveReloadTests() {
 
     await check('bookkeeping writes stay silent', async () => {
       const sse = await openSse(port);
-      fs.mkdirSync(path.join(site, '.sitesnap'), { recursive: true });
-      fs.writeFileSync(path.join(site, '.sitesnap', 'undo.json'), '{}');
+      fs.mkdirSync(path.join(site, '.siteslurp'), { recursive: true });
+      fs.writeFileSync(path.join(site, '.siteslurp', 'undo.json'), '{}');
       fs.writeFileSync(path.join(site, 'thumb.png'), 'png');
       await sse.quiet(700);
       sse.close();
@@ -688,7 +696,7 @@ async function liveReloadTests() {
       ok(hostMgr.setLive(site, false), 'toggle accepted');
       const res = await get(port, '/');
       eq(res.body.toString(), pageOnDisk, 'served bytes = disk bytes: ');
-      eq((await get(port, '/__sitesnap__/events')).status, 404, 'sse endpoint gone: ');
+      eq((await get(port, '/__siteslurp__/events')).status, 404, 'sse endpoint gone: ');
       ok(hostMgr.setLive(site, true), 'toggle back on');
       ok((await get(port, '/')).body.toString().includes('livereload.js'), 'injection is back');
     });
@@ -975,14 +983,14 @@ async function reviewApiTests() {
   try {
     await check('review mode injects the overlay and serves it', async () => {
       const page = await request('GET', '/');
-      ok(page.text.includes('/__sitesnap__/review/client.js'), 'tag injected');
-      const script = await request('GET', '/__sitesnap__/review/client.js');
+      ok(page.text.includes('/__siteslurp__/review/client.js'), 'tag injected');
+      const script = await request('GET', '/__siteslurp__/review/client.js');
       eq(script.status, 200);
       ok(script.text.includes('__ssReview'), 'overlay script body');
     });
 
     await check('state reports the project and an open review', async () => {
-      const res = await request('GET', '/__sitesnap__/review/state');
+      const res = await request('GET', '/__siteslurp__/review/state');
       eq(res.status, 200);
       eq(res.json.project.id, project.id);
       ok(/^rev_\d{8}_\d{2}$/.test(res.json.review.id), 'review id');
@@ -990,7 +998,7 @@ async function reviewApiTests() {
     });
 
     await check('the no-reason rule surfaces as a 400, not a save', async () => {
-      const res = await request('POST', '/__sitesnap__/review/annotate', {
+      const res = await request('POST', '/__siteslurp__/review/annotate', {
         scope: 'element', context: { selector: 'h1.hero' }, input: { rating: 4 },
       });
       eq(res.status, 400);
@@ -998,34 +1006,34 @@ async function reviewApiTests() {
     });
 
     await check('a valid annotation round-trips through http', async () => {
-      const res = await request('POST', '/__sitesnap__/review/annotate', {
+      const res = await request('POST', '/__siteslurp__/review/annotate', {
         scope: 'element',
         context: { selector: 'h1.hero', pageUrl: '/', viewport: { width: 1440, height: 900, label: 'desktop' } },
         input: { rating: 4, severity: 'should-fix', why: 'Headline has no presence at all.', want: 'Bigger, bolder.' },
       });
       eq(res.status, 200);
       ok(res.json.annotation.id, 'saved with id');
-      const state = await request('GET', '/__sitesnap__/review/state');
+      const state = await request('GET', '/__siteslurp__/review/state');
       eq(state.json.annotations.length, 1);
     });
 
     await check('cross-origin posts are refused', async () => {
-      const res = await request('POST', '/__sitesnap__/review/annotate', {
+      const res = await request('POST', '/__siteslurp__/review/annotate', {
         scope: 'global', context: {}, input: { why: 'Sneaky cross-site write attempt.' },
       }, { Origin: 'http://evil.example' });
       eq(res.status, 403);
     });
 
     await check('export over http produces the folder and reveal is scoped', async () => {
-      const res = await request('POST', '/__sitesnap__/review/export');
+      const res = await request('POST', '/__siteslurp__/review/export');
       eq(res.status, 200);
       ok(fs.existsSync(path.join(res.json.folder, 'REVIEW.md')), 'REVIEW.md exists');
     });
 
     await check('resolve over http re-rates and can request an anchor', async () => {
-      const state = await request('GET', '/__sitesnap__/review/state');
+      const state = await request('GET', '/__siteslurp__/review/state');
       const target = state.json.annotations[0];
-      const res = await request('POST', '/__sitesnap__/review/resolve', {
+      const res = await request('POST', '/__siteslurp__/review/resolve', {
         id: target.id, resolvedRating: 8, asAnchor: true,
       });
       eq(res.status, 200);
@@ -1036,9 +1044,9 @@ async function reviewApiTests() {
     });
 
     await check('done turns the api off; the page serves clean again', async () => {
-      const res = await request('POST', '/__sitesnap__/review/done');
+      const res = await request('POST', '/__siteslurp__/review/done');
       eq(res.status, 200);
-      const after = await request('GET', '/__sitesnap__/review/state');
+      const after = await request('GET', '/__siteslurp__/review/state');
       eq(after.status, 404);
       const page = await request('GET', '/');
       ok(!page.text.includes('review/client.js'), 'injection gone');
@@ -1101,7 +1109,7 @@ async function miscTests() {
 
 /* ---------------- run ---------------- */
 (async () => {
-  console.log(`SiteSnap checks  (scratch: ${TMP})`);
+  console.log(`SiteSlurp checks  (scratch: ${TMP})`);
   await paletteTests();
   await extractTests();
   await zipTests();

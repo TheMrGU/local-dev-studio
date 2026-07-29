@@ -1,10 +1,10 @@
-/* Launch SiteSnap, screenshot the UI, make sure it actually rendered.
+/* Launch SiteSlurp, screenshot the UI, make sure it actually rendered.
  * With --capture, it also drives the capture form for real and waits for the result,
  * which exercises renderer -> ipc -> browser -> extract -> thumbnail end to end.
  *
  *   npm run smoke                                        # dev build, UI only
- *   node scripts/smoke.js dist\win-unpacked\SiteSnap.exe --capture
- *   node scripts/smoke.js dist\win-unpacked\SiteSnap.exe --capture https://site.com
+ *   node scripts/smoke.js "dist\win-unpacked\SiteSlurp Studio.exe" --capture
+ *   node scripts/smoke.js "dist\win-unpacked\SiteSlurp Studio.exe" --capture https://site.com
  */
 'use strict';
 const fs = require('fs');
@@ -18,7 +18,7 @@ const captureUrl = captureIndex === -1
   ? null
   : (argv[captureIndex + 1] && !argv[captureIndex + 1].startsWith('--') ? argv[captureIndex + 1] : 'https://example.com');
 const target = argv.find((arg, i) => i !== captureIndex && arg !== captureUrl && !arg.startsWith('--'));
-const out = path.join(os.tmpdir(), 'sitesnap-smoke.png');
+const out = path.join(os.tmpdir(), 'siteslurp-smoke.png');
 fs.rmSync(out, { force: true });
 
 const [command, args] = target
@@ -35,8 +35,8 @@ console.log(`launching ${path.basename(command)}${captureUrl ? ` and capturing $
 const child = spawn(command, args, {
   env: {
     ...process.env,
-    SNAP_SELFTEST_OUT: out,
-    ...(captureUrl ? { SNAP_SELFTEST_URL: captureUrl } : {}),
+    SLURP_SELFTEST_OUT: out,
+    ...(captureUrl ? { SLURP_SELFTEST_URL: captureUrl } : {}),
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });

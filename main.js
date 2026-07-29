@@ -1,4 +1,4 @@
-// SiteSnap — capture any website, extract it into editable files, host it locally.
+// SiteSlurp — capture any website, extract it into editable files, host it locally.
 const { app, BrowserWindow, ipcMain, shell, dialog, screen } = require('electron');
 const fs = require('fs');
 const path = require('path');
@@ -24,6 +24,18 @@ const { captureAnnotationShots } = require('./lib/shots');
 const { locateSource } = require('./lib/sourceline');
 const { makeThumb } = require('./lib/thumbs');
 const { buildMenu } = require('./lib/menu');
+
+// This app shipped as "SiteSnap" through 1.x, and the rename moved the profile
+// folder. Copy the old profile (settings, projects, reviews) into the new
+// location once, before anything below opens it, so nothing is lost.
+try {
+  const newData = app.getPath('userData');
+  const oldData = path.join(app.getPath('appData'), 'SiteSnap');
+  if (!fs.existsSync(path.join(newData, 'settings.json'))
+      && fs.existsSync(path.join(oldData, 'settings.json'))) {
+    fs.cpSync(oldData, newData, { recursive: true, force: false });
+  }
+} catch { /* a failed migration must not stop the launch */ }
 
 const hosts = new HostManager();
 let win = null;
@@ -100,7 +112,7 @@ async function enrichAnnotation(project, annotation) {
   }
 }
 
-app.setAppUserModelId('com.nightshyft.sitesnap');
+app.setAppUserModelId('com.nightshyft.siteslurp');
 
 // ---------- helpers ----------
 const send = (channel, data) => { if (win && !win.isDestroyed()) win.webContents.send(channel, data); };
@@ -125,7 +137,7 @@ function assertInRoot(dir, what = 'That folder') {
 /** The looser gate for read-and-serve operations (hosting, thumbnails, opening):
  *  the captures root plus every folder the user explicitly registered as a
  *  project. Content-mutating operations (palette, video fix, delete, zip) keep
- *  the strict in-root rule — SiteSnap edits its own captures, not your repos. */
+ *  the strict in-root rule — SiteSlurp edits its own captures, not your repos. */
 function assertManaged(dir, what = 'That folder') {
   if (typeof dir !== 'string' || !dir.trim()) throw new Error(`${what} is missing.`);
   if (!isInRoot(dir) && !hosts.portFor(dir) && !projects.byPath(dir)) {
@@ -215,7 +227,7 @@ async function runCapture(opts) {
     const current = settings.load();
     const url = normalizeUrl(opts.url);
     const singleFilePath = findSingleFile(current.singleFilePath);
-    if (!singleFilePath) throw new Error('The bundled page-capture engine is missing. Reinstall SiteSnap.');
+    if (!singleFilePath) throw new Error('The bundled page-capture engine is missing. Reinstall SiteSlurp.');
     const browserPath = await resolveBrowser();
     if (!browserPath) {
       throw new Error('No Chromium browser found. Install Google Chrome or Microsoft Edge, then set it in Settings.');
@@ -629,7 +641,7 @@ function registerIpc() {
       buttons: [confirmLabel || 'OK', 'Cancel'],
       defaultId: 0,
       cancelId: 1,
-      title: title || 'SiteSnap',
+      title: title || 'SiteSlurp Studio',
       message: message || '',
       detail: detail || '',
     });
@@ -678,8 +690,8 @@ function createWindow() {
     y: bounds ? bounds.y : undefined,
     minWidth: 900,
     minHeight: 620,
-    backgroundColor: '#f5f5f7',
-    title: 'SiteSnap',
+    backgroundColor: '#08080A',
+    title: 'SiteSlurp Studio',
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -741,7 +753,7 @@ function debounce(fn, ms) {
 // then exit. Used by `npm run smoke` to check a build before shipping it.
 function runSelfTest() {
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const url = process.env.SNAP_SELFTEST_URL;
+  const url = process.env.SLURP_SELFTEST_URL;
   let failure = null;
 
   win.webContents.once('did-finish-load', async () => {
@@ -794,7 +806,7 @@ function runSelfTest() {
       }
 
       const img = await win.webContents.capturePage();
-      const out = process.env.SNAP_SELFTEST_OUT || path.join(app.getPath('temp'), 'sitesnap-selftest.png');
+      const out = process.env.SLURP_SELFTEST_OUT || path.join(app.getPath('temp'), 'siteslurp-selftest.png');
       fs.writeFileSync(out, img.toPNG());
       log.info('selftest screenshot', out);
     } catch (err) {
@@ -814,7 +826,7 @@ function runSelfTest() {
 if (!app.requestSingleInstanceLock()) {
   // A second copy would fight over ports and the settings file. Say so out loud:
   // otherwise an automated run just sees a silent exit 0 and no window.
-  console.error('SiteSnap is already running — bringing the existing window forward.');
+  console.error('SiteSlurp is already running — bringing the existing window forward.');
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -832,7 +844,7 @@ if (!app.requestSingleInstanceLock()) {
     // hosting and leave an unclickable window; showMessageBox doesn't.
     dialog.showMessageBox({
       type: 'error',
-      title: 'SiteSnap hit an error',
+      title: 'SiteSlurp hit an error',
       message: err && err.message ? err.message : String(err),
       detail: `The app will keep running, but something may be in a bad state.\n\nDetails were written to:\n${log.logPath()}`,
       buttons: ['Continue', 'Open log'],
@@ -862,7 +874,7 @@ if (!app.requestSingleInstanceLock()) {
   }
 
   app.whenReady().then(async () => {
-    log.info(`SiteSnap ${app.getVersion()} starting — electron ${process.versions.electron}`);
+    log.info(`SiteSlurp ${app.getVersion()} starting — electron ${process.versions.electron}`);
     registerIpc();
     createWindow();
     // Fill in a browser on first run without blocking the window.
