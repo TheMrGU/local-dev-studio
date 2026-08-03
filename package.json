@@ -17,6 +17,8 @@
     "dist": "electron-builder --win",
     "dist:portable": "electron-builder --win portable",
     "dist:installer": "electron-builder --win nsis",
+    "dist:store": "node scripts/dist-store.js",
+    "dist:signed": "node scripts/dist-signed.js",
     "release": "npm test && npm run dist",
     "e2e": "node scripts/e2e.js"
   },
@@ -83,6 +85,17 @@
     "portable": {
       "artifactName": "SiteSlurp-${version}-portable.${ext}",
       "unpackDirName": "SiteSlurp"
+    },
+    "appx": {
+      "applicationId": "SiteSlurpStudio",
+      "displayName": "SiteSlurp Studio",
+      "publisherDisplayName": "NightShyft Studios",
+      "backgroundColor": "#14141D",
+      "showNameOnTiles": true,
+      "languages": [
+        "en-US"
+      ],
+      "artifactName": "SiteSlurp-${version}-store.${ext}"
     },
     "publish": null
   }

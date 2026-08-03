@@ -22,8 +22,9 @@ Chromium work too — SiteSlurp finds whichever you have and lets you pick in Se
 You do **not** need Node.js, npm, or any command-line tools. The page-capture engine ships
 inside the app and runs on Electron's own runtime.
 
-> Windows SmartScreen will warn on first run, because these builds aren't code-signed
-> (a certificate costs money). Click **More info → Run anyway**.
+> Windows SmartScreen will warn on first run, because these builds aren't code-signed yet.
+> Click **More info → Run anyway**. A Microsoft Store build is in the works, which will drop
+> the warning entirely — see [docs/windows-signing.md](docs/windows-signing.md).
 
 ## What it does
 
