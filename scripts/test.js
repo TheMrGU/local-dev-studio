@@ -29,6 +29,10 @@ const { scanPalette, applyColor, undoColor, parseColor } = require('../lib/palet
 const { extractSite, uniqueOutDir } = require('../lib/extract');
 const { zipFolder } = require('../lib/zip');
 const { makeHandler, HostManager } = require('../lib/server');
+const { makeProxyHandler } = require('../lib/proxy');
+const { parsePublicUrl, viaTunnel } = require('../lib/tunnel');
+const runtimes = require('../lib/runtimes');
+const { portAnswers } = require('../lib/runner');
 const { resolveEntry } = require('../lib/entry');
 const { normalizeUrl, nameFromUrl, reserveCaptureDir } = require('../lib/capture');
 const settings = require('../lib/settings');
@@ -513,8 +517,14 @@ async function projectTests() {
     const file = path.join(scratch('prj-file'), 'x.txt');
     fs.writeFileSync(file, 'x');
     await throws(() => projectsReg.addLocal(file), 'a file, not a folder');
-    await throws(() => projectsReg.addLocal(scratch('prj-empty')), 'no html inside');
     await throws(() => projectsReg.addLocal(a), 'already registered');
+    // A folder with no HTML is no longer junk: a Next.js app, a Django site or
+    // a PHP shop has none until something runs. It comes in with no runtime
+    // decided, which the card and the runtime panel say out loud.
+    const bare = projectsReg.addLocal(scratch('prj-empty'));
+    eq(bare.runtime.kind, 'command');
+    eq(bare.runtime.id, 'custom');
+    eq(bare.runtime.command, '');
   });
 
   await check('a squatted port slides to a free one and the new port persists', async () => {
@@ -777,6 +787,33 @@ async function reviewStoreTests() {
     eq(miss.sourceLine, null, 'ambiguous match refused: ');
     const gone = locateSource(dir, { context: { sourceFile: 'nope.html', outerHTML: '<h1>x</h1>' } });
     eq(gone.sourceLine, null);
+  });
+
+  await check('a generated page is traced back to the component that made it', () => {
+    // A Next.js app serves /about from src/app/about/page.tsx — there is no
+    // about.html to search, so the element's own id and text are the trail.
+    const dir = scratch('srcline-next');
+    fs.mkdirSync(path.join(dir, 'src', 'app', 'about'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'node_modules', 'junk'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'app', 'about', 'page.tsx'),
+      'export default function About() {\n  return (\n    <section id="team-block">\n'
+      + '      <h1 className="display">Built in Ohio, shipped everywhere</h1>\n    </section>\n  );\n}\n');
+    fs.writeFileSync(path.join(dir, 'node_modules', 'junk', 'page.tsx'), 'id="team-block"');
+
+    const byId = locateSource(dir, {
+      context: { sourceFile: 'about', outerHTML: '<section id="team-block" class="wrap">' },
+    });
+    eq(byId.sourceFile, 'src/app/about/page.tsx');
+    eq(byId.sourceLine, 3, 'found the jsx line, ignoring node_modules: ');
+
+    const byText = locateSource(dir, {
+      context: { sourceFile: 'about', outerHTML: '<h1 class="display">Built in Ohio, shipped everywhere</h1>' },
+    });
+    eq(byText.sourceFile, 'src/app/about/page.tsx');
+    eq(byText.sourceLine, 4, 'className never matches, the words do: ');
+
+    const nothing = locateSource(dir, { context: { sourceFile: 'about', outerHTML: '<div class="grid"></div>' } });
+    eq(nothing.sourceLine, null, 'no guess when there is no evidence: ');
   });
 }
 
@@ -1107,6 +1144,305 @@ async function miscTests() {
   });
 }
 
+/* ---------------- runtimes: sites that aren't just files ---------------- */
+async function runtimeTests() {
+  console.log('\nruntimes');
+
+  const write = (dir, name, body) => {
+    const file = path.join(dir, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, body);
+    return dir;
+  };
+
+  await check('reads a Next.js app off its package.json, not its HTML', () => {
+    const dir = scratch('rt-next');
+    write(dir, 'package.json', JSON.stringify({
+      dependencies: { next: '16.2.6', react: '19' },
+      scripts: { dev: 'next dev', build: 'next build', start: 'next start' },
+    }));
+    const found = runtimes.detect(dir);
+    eq(found.kind, 'command');
+    eq(found.id, 'next');
+    ok(found.command.includes('{port}'), 'command takes our port: ' + found.command);
+    eq(found.install, 'npm install');
+    ok(runtimes.needsInstall(dir, found), 'no node_modules yet');
+    fs.mkdirSync(path.join(dir, 'node_modules'), { recursive: true });
+    ok(!runtimes.needsInstall(dir, found), 'install satisfied by node_modules');
+    // The production build is offered as an alternative, never as the default.
+    ok(runtimes.candidates(dir).some(c => c.id === 'next:prod'), 'prod build offered');
+    ok(runtimes.candidates(dir).some(c => c.id === 'custom'), 'custom always offered');
+  });
+
+  await check('lockfiles pick the package manager', () => {
+    const dir = write(scratch('rt-pnpm'), 'package.json', JSON.stringify({
+      dependencies: { vite: '5' }, scripts: { dev: 'vite' },
+    }));
+    write(dir, 'pnpm-lock.yaml', '');
+    const found = runtimes.detect(dir);
+    ok(found.command.startsWith('pnpm run dev'), found.command);
+    eq(found.install, 'pnpm install');
+  });
+
+  await check('recognises the non-node stacks too', () => {
+    const django = write(scratch('rt-django'), 'manage.py', '');
+    eq(runtimes.detect(django).id, 'django');
+    const php = write(scratch('rt-php'), 'public/index.php', '<?php');
+    ok(runtimes.detect(php).command.includes('-t public'), 'docroot found');
+    const jekyll = write(scratch('rt-jekyll'), '_config.yml', 'title: x');
+    write(jekyll, 'Gemfile', 'source "https://rubygems.org"');
+    ok(runtimes.detect(jekyll).command.startsWith('bundle exec jekyll'), 'bundled jekyll');
+  });
+
+  await check('a folder of HTML is still just files, and built output counts', () => {
+    const plain = write(scratch('rt-static'), 'index.html', '<h1>hi</h1>');
+    eq(runtimes.detect(plain).kind, 'static');
+    const built = write(scratch('rt-built'), 'dist/index.html', '<h1>built</h1>');
+    const found = runtimes.detect(built);
+    eq(found.kind, 'static');
+    eq(found.root, 'dist');
+  });
+
+  await check('nothing recognisable means no runtime, not a wrong guess', () => {
+    eq(runtimes.detect(scratch('rt-nothing')), null);
+  });
+
+  // The whole point: a project that only exists once a process runs still gets
+  // hosted on its own stable SiteSlurp port, with the process supervised.
+  await check('hosts a command project through the proxy, then kills it on stop', async () => {
+    const dir = scratch('rt-live');
+    write(dir, 'server.js', `
+      const http = require('http');
+      http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<html><body>generated at ' + req.url + '</body></html>');
+      }).listen(Number(process.argv[2]), '127.0.0.1');
+    `);
+    const runtime = {
+      kind: 'command', id: 'custom', label: 'test server',
+      command: `node server.js {port}`,
+    };
+    const hostMgr = new HostManager();
+    const port = await hostMgr.start(dir, 4390, { runtime, name: 'test' });
+    const get = urlPath => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: urlPath, headers: { accept: 'text/html' } }, res => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    try {
+      // Hosting returns immediately; until the child answers, the port serves
+      // the boot page rather than a connection error.
+      const booting = await get('/');
+      ok(booting.status === 503 || booting.status === 200, 'boot page or already up: ' + booting.status);
+
+      let body = '';
+      for (let attempt = 0; attempt < 100 && !body.includes('generated at'); attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        body = (await get('/hello')).body;
+      }
+      ok(body.includes('generated at /hello'), 'proxied to the child: ' + body.slice(0, 120));
+      eq(hostMgr.runtimeState(dir).status, 'ready');
+      const child = hostMgr.runtimeState(dir).port;
+      ok(child !== port, 'child got its own private port');
+
+      hostMgr.stop(dir);
+      // The child must go with it — an orphan would hold its port forever.
+      let alive = true;
+      for (let attempt = 0; attempt < 40 && alive; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        alive = await portAnswers(child, 200);
+      }
+      ok(!alive, `child on ${child} outlived the host`);
+    } finally {
+      hostMgr.stopAll();
+    }
+  });
+
+  // Studio's whole value proposition has to survive the extra hop: annotating a
+  // Next.js app must work exactly like annotating a folder of HTML, and the
+  // framework's hot reload socket must reach its own server through us.
+  await check('review overlay is injected into proxied pages, and upgrades pass through', async () => {
+    const dir = scratch('rt-review');
+    write(dir, 'server.js', `
+      const http = require('http');
+      const server = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<html><body><h1 class="hero">Generated</h1></body></html>');
+      });
+      // A stand-in for an HMR socket: accept the upgrade and echo what it hears.
+      server.on('upgrade', (req, socket) => {
+        socket.write('HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\n\\r\\n');
+        socket.on('data', chunk => socket.write(chunk));
+      });
+      server.listen(Number(process.argv[2]), '127.0.0.1');
+    `);
+    const project = projectsReg.addLocal(dir);
+    const manager = new ReviewManager({
+      projects: projectsReg,
+      capturesRoot: () => scratch('rt-review-caps'),
+      exportReview,
+      overlayPath: path.join(ROOT, 'renderer', 'review-overlay.js'),
+    });
+    const hostMgr = new HostManager();
+    hostMgr.reviewRouter = d => manager.forDir(d);
+    const port = await hostMgr.start(dir, 4396, {
+      runtime: { kind: 'command', id: 'custom', label: 'test', command: 'node server.js {port}' },
+    });
+    manager.enable(dir, project.id);
+    const get = urlPath => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: urlPath, headers: { accept: 'text/html' } }, res => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    try {
+      let page = { body: '' };
+      for (let attempt = 0; attempt < 100 && !page.body.includes('Generated'); attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        page = await get('/');
+      }
+      ok(page.body.includes('Generated'), 'child page came through');
+      ok(page.body.includes('__siteslurp__/review/client.js'), 'overlay injected: ' + page.body);
+      // The overlay's own endpoints are answered by us, not forwarded.
+      const overlay = await get('/__siteslurp__/review/client.js');
+      eq(overlay.status, 200);
+
+      const echoed = await new Promise((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1', port, path: '/hmr',
+          headers: { Connection: 'Upgrade', Upgrade: 'websocket' },
+        });
+        req.on('upgrade', (res, socket) => {
+          socket.once('data', chunk => { socket.destroy(); resolve(chunk.toString()); });
+          socket.write('ping');
+        });
+        req.on('error', reject);
+        setTimeout(() => reject(new Error('no upgrade came back')), 5000).unref();
+        req.end();
+      });
+      eq(echoed, 'ping');
+    } finally {
+      manager.disable(dir);
+      hostMgr.stopAll();
+    }
+  });
+
+  await check('a command runtime with no command is refused, not spawned', async () => {
+    const hostMgr = new HostManager();
+    await throws(() => hostMgr.start(scratch('rt-nocmd'), 4395, {
+      runtime: { kind: 'command', id: 'custom', label: 'x', command: '' },
+    }), 'empty command refused');
+    hostMgr.stopAll();
+  });
+}
+
+/* ---------------- sharing ---------------- */
+async function sharingTests() {
+  console.log('\nsharing');
+
+  await check('finds the public address in cloudflared output, nothing else', () => {
+    const banner = [
+      '2026-08-06T08:00:00Z INF Thank you for trying Cloudflare Tunnel. If you intend to use',
+      'Tunnels in production you should read: https://developers.cloudflare.com/cloudflare-one/',
+      '2026-08-06T08:00:02Z INF +------------------------------------------------------------+',
+      '2026-08-06T08:00:02Z INF |  Your quick Tunnel has been created! Visit it at:          |',
+      '2026-08-06T08:00:02Z INF |  https://liberia-sandwich-brings-relatives.trycloudflare.com  |',
+      '2026-08-06T08:00:02Z INF +------------------------------------------------------------+',
+    ].join('\n');
+    eq(parsePublicUrl(banner), 'https://liberia-sandwich-brings-relatives.trycloudflare.com');
+    eq(parsePublicUrl('INF Requesting new quick Tunnel on trycloudflare.com...'), null);
+    eq(parsePublicUrl('read https://developers.cloudflare.com/cloudflare-one/'), null);
+  });
+
+  await check('a request through the tunnel is recognised by its edge headers', () => {
+    eq(viaTunnel({ headers: {} }), false);
+    eq(viaTunnel({ headers: { 'cf-connecting-ip': '203.0.113.9' } }), true);
+    eq(viaTunnel({ headers: { 'cf-ray': '8a1b2c3d4e5f-EWR' } }), true);
+  });
+
+  // Review Mode can reveal folders and write exports on this machine, and live
+  // reload is tooling for the person at the keyboard. Neither may exist for a
+  // visitor who arrived through the public link.
+  await check('review and live reload are local-only: hidden from tunneled requests', async () => {
+    const dir = scratch('share-guard');
+    fs.writeFileSync(path.join(dir, 'index.html'), '<html><body><h1>Hi</h1></body></html>');
+    const liveStub = {
+      inject: buf => Buffer.concat([buf, Buffer.from('<script>LIVE</script>')]),
+      handleRequest: (req, res) => { res.writeHead(200); res.end('sse'); },
+    };
+    const reviewStub = {
+      handleRequest: (req, res) => { res.writeHead(200); res.end('review api'); },
+    };
+    const handler = makeHandler(dir, { live: () => liveStub, review: () => reviewStub });
+    const server = http.createServer(handler);
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    const get = (urlPath, headers = {}) => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: urlPath, headers }, res => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
+      }).on('error', reject);
+    });
+    const edge = { 'cf-connecting-ip': '203.0.113.9' };
+    try {
+      const local = await get('/');
+      ok(local.body.includes('review/client.js'), 'local page carries the overlay');
+      ok(local.body.includes('LIVE'), 'local page carries live reload');
+      const remote = await get('/', edge);
+      ok(!remote.body.includes('review/client.js'), 'tunneled page has no overlay');
+      ok(!remote.body.includes('LIVE'), 'tunneled page has no live reload');
+      ok(remote.body.includes('<h1>Hi</h1>'), 'the site itself still serves');
+      eq((await get('/__siteslurp__/review/api/state')).status, 200);
+      eq((await get('/__siteslurp__/review/api/state', edge)).status, 404, 'review api is local-only: ');
+      eq((await get('/__siteslurp__/events')).status, 200);
+      eq((await get('/__siteslurp__/events', edge)).status, 404, 'live reload is local-only: ');
+    } finally {
+      server.close();
+      server.closeAllConnections?.();
+    }
+  });
+
+  await check('tunneled requests reach the dev server with a localhost host header', async () => {
+    // Vite 6+ rejects Host values it doesn't know as DNS-rebinding attempts;
+    // the proxy answers for the tunnel by asking upstream for localhost.
+    const upstream = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(JSON.stringify({ host: req.headers.host, forwarded: req.headers['x-forwarded-host'] }));
+    });
+    await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    const upstreamPort = upstream.address().port;
+    const { handler } = makeProxyHandler(() => ({ status: 'ready', port: upstreamPort }));
+    const front = http.createServer(handler);
+    await new Promise(resolve => front.listen(0, '127.0.0.1', resolve));
+    const port = front.address().port;
+    const get = headers => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: '/', headers }, res => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve(JSON.parse(Buffer.concat(chunks).toString())));
+      }).on('error', reject);
+    });
+    try {
+      const local = await get({ host: `localhost:${port}` });
+      eq(local.host, `localhost:${port}`, 'local host header passes through: ');
+      const remote = await get({ host: 'random-words.trycloudflare.com', 'cf-connecting-ip': '203.0.113.9' });
+      eq(remote.host, `127.0.0.1:${upstreamPort}`, 'tunneled host is rewritten: ');
+      eq(remote.forwarded, 'random-words.trycloudflare.com', 'original host survives in x-forwarded-host: ');
+    } finally {
+      front.close(); front.closeAllConnections?.();
+      upstream.close(); upstream.closeAllConnections?.();
+    }
+  });
+}
+
 /* ---------------- run ---------------- */
 (async () => {
   console.log(`SiteSlurp checks  (scratch: ${TMP})`);
@@ -1116,6 +1452,10 @@ async function miscTests() {
   await serverTests();
   await entryTests();
   await projectTests();
+  // After projectTests: registering a project here would shift the ports it
+  // asserts absolutely.
+  await runtimeTests();
+  await sharingTests();
   await liveReloadTests();
   await reviewStoreTests();
   await reviewExportTests();

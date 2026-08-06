@@ -43,10 +43,28 @@ inside the app and runs on Electron's own runtime.
    loopback are bound, so a stray server on the other stack can't shadow a hosted site — if
    another process owns half a port, SiteSlurp skips to the next one. The generated page list
    stays available via **⋯ → Open sitemap** (`/_index.html`).
-5. **Recolor** — scans the site's palette; click a swatch, pick a replacement, and it swaps
+5. **Host what isn't HTML** — a folder that needs a process to become a website is hosted the
+   same way. Drop a Next.js, Vite, Astro, SvelteKit, Nuxt, Angular, Gatsby, Remix, CRA or
+   Eleventy project — or Django, Flask, FastAPI, Laravel, plain PHP, Rails, Jekyll, Hugo, Go,
+   Rust — and SiteSlurp reads its `package.json` (or `manage.py`, `artisan`, `Gemfile`,
+   `hugo.toml`…), works out the dev-server command and the install step, then runs it on a
+   private port while keeping its own. Anything not in that list is a **custom command** away.
+   Because SiteSlurp keeps the public port and proxies, everything else still works: one stable
+   address per project, hot-module-reload websockets pass straight through, and Review Mode
+   annotates a running React app exactly as it annotates a folder of files — mapping notes back
+   to the component that rendered them. See **⋯ → How to serve this…** on any dropped folder.
+6. **Share publicly** — the share toggle on any hosted card puts that site on the internet
+   through a Cloudflare quick tunnel and hands you an `https://….trycloudflare.com` link.
+   No account, no router or firewall changes: the tunnel engine (cloudflared, ~60MB) is
+   downloaded once on the first share, then it's one click. The address is random on purpose —
+   shareable, not guessable — and dies the moment you stop sharing, stop hosting, or close the
+   app. Visitors get the site and only the site: Review Mode, its API and live reload stay
+   local-only, and dev servers behind the proxy see a localhost Host header so host checking
+   (Vite 6+) doesn't reject tunneled requests.
+7. **Recolor** — scans the site's palette; click a swatch, pick a replacement, and it swaps
    that color across every css, html and svg file. Alpha and notation are preserved
    (`rgba(…, .5)` stays `rgba`, `#abc` stays shorthand), and every recolor is undoable.
-6. **Extras** — homepage thumbnails, ZIP export, open in VS Code / Explorer, delete to the
+8. **Extras** — homepage thumbnails, ZIP export, open in VS Code / Explorer, delete to the
    Recycle Bin (optionally together with the raw snapshot it was extracted from). Each card
    shows the primary actions; everything else is under the **⋯** menu.
 
@@ -59,6 +77,12 @@ one from the older `crawl.ps1` / `capture.ps1` / `extract.ps1` scripts.
 Raw captures get an **Extract** button; extracted ones get **Host** and the editing tools.
 Once a raw capture has been extracted, it's hidden behind the **Raw snapshots** toggle to keep
 the grid clean.
+
+Drop any folder on the window to add it. It doesn't have to contain HTML — SiteSlurp works out
+what it is and shows that on the card ("Next.js dev server", "Django dev server", "Static
+files"). If it needs dependencies, the card says **needs install** and hosting offers to fetch
+them first. **⋯ → How to serve this…** shows every runtime detected for that folder, the exact
+command that will run, and — while it's hosted — what the process is printing.
 
 ## Keyboard
 
@@ -93,6 +117,8 @@ capture, failure and stack trace.
 | Deep links 404 while hosting | Those pages were beyond the crawl depth and never got saved. Recapture with a higher depth. |
 | Hosting shows a completely different website | Another program is serving that port on the other network stack (a leftover `python -m http.server`, a dev server, …). SiteSlurp now binds both loopbacks and skips such ports automatically — stop the other program, or just re-host and use the port SiteSlurp reports. |
 | Port already in use | SiteSlurp walks forward from the default port automatically; change the default in Settings if you want a different range. |
+| A dropped project says "failed to start" | Open **⋯ → How to serve this…** — the process's own output is at the bottom of the panel. Usually a missing install step, a command that wants a different flag, or an app that needs its `.env`. The command is editable; Save and host again. |
+| The dev server needs a toolchain SiteSlurp can't find | The command runs through your shell, so it needs `npm` / `python` / `php` / `docker` on PATH. Launching SiteSlurp from a terminal where the tool works is the quickest way to confirm it. |
 
 ## Development
 
@@ -124,7 +150,10 @@ lib/browsers.js  Chromium detection
 lib/capture.js   drives the bundled SingleFile CLI
 lib/extract.js   snapshot -> editable files
 lib/entry.js     which page is a capture's real homepage
-lib/server.js    local static host (binds both loopbacks)
+lib/server.js    local host — files off disk, or a proxy to a project's dev server
+lib/runtimes.js  what a folder needs to become a website (detection + commands)
+lib/runner.js    supervises that process: spawn, readiness, logs, kill the tree
+lib/proxy.js     forwards requests (and HMR websockets) to it, injecting as it goes
 lib/palette.js   color scan / swap / undo
 lib/videofix.js  restores stripped <video> sources
 lib/zip.js       dependency-free ZIP writer

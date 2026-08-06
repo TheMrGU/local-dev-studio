@@ -36,6 +36,7 @@
   <symbol id="i-expand" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M16 21h3a2 2 0 0 0 2-2v-3M8 21H5a2 2 0 0 1-2-2v-3"/></symbol>
   <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9M18.4 6.6a9 9 0 1 1-12.8 0"/></symbol>
   <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-5M12 8h.01"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 3.9M15.4 6.6 8.6 10.5"/></symbol>
 </svg>
 
 <!-- The window's own title bar. There is no OS frame and no menu strip behind
@@ -315,6 +316,36 @@
     <div id="historyList" class="history-list"></div>
     <div class="modal-actions">
       <button id="historyClose" class="primary small">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="runtimeModal" class="modal hidden">
+  <div class="modal-card runtime-card">
+    <h3>How to serve <span id="rtName" class="mini"></span></h3>
+    <p class="modal-hint" id="rtDetected"></p>
+    <label>Runtime
+      <select id="rtPick" aria-label="Runtime"></select>
+    </label>
+    <label id="rtCommandRow">Start command
+      <input id="rtCommand" type="text" spellcheck="false" placeholder="npm run dev -- --port {port}">
+      <span class="mini">SiteSlurp runs this in the project folder, replaces <code>{port}</code> with a private
+        port, and proxies its own port to it — so the address, live preview and Review Mode stay the same.</span>
+    </label>
+    <label id="rtPortRow">App port
+      <input id="rtAppPort" type="number" min="0" max="65535" placeholder="auto">
+      <span class="mini">Only when the command binds a port of its own (docker, a hard-coded server).</span>
+    </label>
+    <div id="rtInstallRow" class="rt-install hidden">
+      <span id="rtInstallText" class="mini"></span>
+      <button id="rtInstall" class="small">Install</button>
+    </div>
+    <div id="rtStatus" class="rt-status hidden"></div>
+    <pre id="rtLog" class="rt-log hidden" tabindex="0"></pre>
+    <div class="modal-actions">
+      <button id="rtRestart" class="small hidden">Restart server</button>
+      <button id="rtCancel" class="small">Cancel</button>
+      <button id="rtSave" class="primary small">Save</button>
     </div>
   </div>
 </div>

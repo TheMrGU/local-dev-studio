@@ -11,6 +11,9 @@ const browsers = require('./lib/browsers');
 const { captureSite, findSingleFile, nameFromUrl, normalizeUrl, writeManifest, readManifest } = require('./lib/capture');
 const { extractSite, uniqueOutDir } = require('./lib/extract');
 const { HostManager } = require('./lib/server');
+const { TunnelManager } = require('./lib/tunnel');
+const runtimes = require('./lib/runtimes');
+const { runOnce } = require('./lib/runner');
 const { scanPalette, applyColor, undoColor, listUndo } = require('./lib/palette');
 const { fixVideos } = require('./lib/videofix');
 const { zipFolder } = require('./lib/zip');
@@ -38,6 +41,15 @@ try {
 } catch { /* a failed migration must not stop the launch */ }
 
 const hosts = new HostManager();
+const tunnels = new TunnelManager({
+  binDir: path.join(app.getPath('userData'), 'bin'),
+  onChange: (dir, state) => {
+    send('share:state', { dir, ...state });
+    // A tunnel dying on its own (network drop, cloudflared crash) has to reach
+    // the card, not just the event stream a closed panel missed.
+    if (state.status === 'failed' || state.status === 'stopped') send('ui:refresh');
+  },
+});
 let win = null;
 let job = null;   // { name, controller } — one long-running pipeline at a time
 
@@ -80,7 +92,9 @@ const reviewManager = new ReviewManager({
   },
   onReveal: folder => shell.openPath(folder),
   onReferenceHost: async (target, pick) => {
-    const port = await hosts.start(target.path, target.port, { liveReload: false });
+    const port = await hosts.start(target.path, target.port, {
+      liveReload: false, runtime: projects.runtimeFor(target), name: target.name,
+    });
     if (port !== target.port) projects.update(target.id, { port });
     reviewManager.enable(target.path, target.id, { pick });
     return `http://localhost:${port}/`;
@@ -121,6 +135,26 @@ app.setAppUserModelId('com.nightshyft.siteslurp');
 // ---------- helpers ----------
 const send = (channel, data) => { if (win && !win.isDestroyed()) win.webContents.send(channel, data); };
 const runLog = text => send('run:log', String(text).replace(/\s+$/, ''));
+
+// A dev server takes seconds to minutes to come up, so the card follows it live
+// instead of freezing on "Host" until the first compile finishes.
+hosts.onRuntimeChange = (dir, state) => {
+  send('runtime:state', { dir, ...state });
+  if (state.status === 'ready' || state.status === 'failed') {
+    log.info('runtime', state.status, dir, state.message);
+    send('ui:refresh');
+  }
+  // The first time a generated site is actually up is the first time there is
+  // a homepage to photograph — until then its card can only show a letter.
+  if (state.status !== 'ready') return;
+  const project = projects.byPath(dir);
+  const port = hosts.portFor(dir);
+  if (!project || project.kind !== 'local' || !port) return;
+  if (fs.existsSync(projects.thumbPath(project.id))) return;
+  makeThumb(dir, projects.thumbPath(project.id), { url: `http://localhost:${port}/` })
+    .then(made => { if (made) send('ui:refresh'); })
+    .catch(() => {});
+};
 
 function isInRoot(dir) {
   const root = path.resolve(settings.load().capturesRoot);
@@ -432,10 +466,11 @@ function registerIpc() {
         autoStart: project.autoStart,
         liveReload: project.liveReload,
         port: hosts.portFor(project.path),
+        runtimeState: hosts.runtimeState(project.path),
       });
     }
     sites.sort((a, b) => b.mtime - a.mtime);
-    return { ...list, sites };
+    return { ...list, sites: sites.map(s => ({ ...s, share: tunnels.state(s.dir) })) };
   });
 
   handle('project:addLocal', async ({ path: dir }) => {
@@ -456,10 +491,80 @@ function registerIpc() {
     if (project.kind !== 'local') {
       throw new Error('Captures are deleted from their card — this only removes local projects.');
     }
+    tunnels.stop(project.path);
     hosts.stop(project.path);
     projects.remove(id);
     fs.promises.rm(projects.thumbPath(id), { force: true }).catch(() => {});
     log.info('local project removed', project.path);
+    return true;
+  });
+
+  // ---------- runtimes ----------
+  // Everything the Runtime panel needs in one call: what the folder looks like
+  // it wants, what it is set to now, and whether it can actually start.
+  handle('project:runtimes', ({ id }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    const current = projects.runtimeFor(project);
+    const found = fs.existsSync(project.path) ? runtimes.candidates(project.path) : [];
+    return {
+      id: project.id,
+      name: project.name,
+      path: project.path,
+      current,
+      candidates: found,
+      detected: runtimes.detect(project.path),
+      needsInstall: runtimes.needsInstall(project.path, current),
+      hosted: !!hosts.portFor(project.path),
+      state: hosts.runtimeState(project.path),
+    };
+  });
+
+  handle('project:setRuntime', async ({ id, runtime }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    if (project.kind !== 'local') throw new Error('Captures are always served as files.');
+    // A running site is serving the old runtime — stop it so the next Host
+    // click starts what was just chosen, rather than silently disagreeing.
+    if (hosts.portFor(project.path)) {
+      tunnels.stop(project.path);
+      reviewManager.disable(project.path);
+      hosts.stop(project.path);
+    }
+    const updated = projects.update(id, { runtime });
+    log.info('runtime set', project.path, updated.runtime.id, updated.runtime.command || '(static)');
+    return updated;
+  });
+
+  handle('project:install', async ({ id }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    const runtime = projects.runtimeFor(project);
+    if (!runtime.install) throw new Error('This runtime has no install step.');
+    const claimed = claimJob('Installing dependencies');
+    send('run:status', { phase: 'install', msg: `Installing dependencies for ${project.name}` });
+    try {
+      await runOnce(runtime.install, project.path, runLog);
+      runLog('  dependencies installed');
+      send('run:done', { ok: true, install: true, dir: project.path });
+      return true;
+    } catch (err) {
+      send('run:done', { ok: false, install: true, error: err.message });
+      throw err;
+    } finally {
+      if (job === claimed) releaseJob();
+    }
+  });
+
+  handle('runtime:state', ({ dir }) => {
+    assertManaged(dir, 'The site folder');
+    return hosts.runtimeState(dir);
+  });
+
+  handle('runtime:restart', ({ dir }) => {
+    assertManaged(dir, 'The site folder');
+    if (!hosts.restart(dir)) throw new Error('That site has no process to restart.');
+    log.info('runtime restart', dir);
     return true;
   });
 
@@ -481,7 +586,9 @@ function registerIpc() {
     assertManaged(dir, 'The site folder');
     const project = projects.byPath(dir);
     if (!project) throw new Error('Only library projects can be reviewed — host it once first.');
-    const port = await hosts.start(project.path, project.port, { liveReload: !!project.liveReload });
+    const port = await hosts.start(project.path, project.port, {
+      liveReload: !!project.liveReload, runtime: projects.runtimeFor(project), name: project.name,
+    });
     if (port !== project.port) projects.update(project.id, { port });
     reviewManager.enable(project.path, project.id);
     const url = `http://localhost:${port}/`;
@@ -532,7 +639,15 @@ function registerIpc() {
     assertManaged(dir, 'The site folder');
     const project = projects.byPath(dir);
     const want = port || (project && project.port) || settings.load().defaultPort;
-    const resolved = await hosts.start(dir, want, { liveReload: !!(project && project.liveReload) });
+    const runtime = projects.runtimeFor(project);
+    if (project && runtime.kind === 'command' && runtimes.needsInstall(dir, runtime)) {
+      throw new Error(`Dependencies aren't installed yet — run "${runtime.install}" from Runtime settings first.`);
+    }
+    const resolved = await hosts.start(dir, want, {
+      liveReload: !!(project && project.liveReload),
+      runtime,
+      name: project ? project.name : path.basename(dir),
+    });
     if (project) {
       // If an external process squatted the registered port, the host manager
       // slid to a free one — persist that so the address stays stable from now on.
@@ -547,14 +662,39 @@ function registerIpc() {
   });
 
   handle('host:stop', ({ dir }) => {
+    tunnels.stop(dir);
     reviewManager.disable(dir);
     return hosts.stop(dir);
   });
   handle('host:stopAll', () => {
     for (const { dir } of hosts.list()) reviewManager.disable(dir);
+    tunnels.stopAll();
     hosts.stopAll();
     return true;
   });
+
+  // ---------- public sharing ----------
+  // One switch: the hosted port goes online through a Cloudflare quick tunnel
+  // and comes back as an https link. The link dies with the toggle, the host,
+  // or the app — nothing outlives the session.
+  handle('share:start', async ({ dir }) => {
+    assertManaged(dir, 'The site folder');
+    const port = hosts.portFor(dir);
+    if (!port) throw new Error('Host the site first — sharing puts the hosted address online.');
+    const url = await tunnels.start(dir, port, {
+      onDownload: p => send('share:download', p),
+    });
+    log.info('sharing', dir, url);
+    return { url };
+  });
+
+  handle('share:stop', ({ dir }) => {
+    const stopped = tunnels.stop(dir);
+    if (stopped) log.info('share stopped', dir);
+    return stopped;
+  });
+
+  handle('share:state', ({ dir }) => tunnels.state(dir));
 
   handle('zip:export', async ({ dir }) => {
     assertInRoot(dir, 'The site folder');
@@ -598,7 +738,11 @@ function registerIpc() {
     assertManaged(dir, 'The site folder');
     const project = projects.byPath(dir);
     const out = project && project.kind === 'local' ? projects.thumbPath(project.id) : undefined;
-    const thumb = await makeThumb(dir, out);
+    // A project that generates its pages only has a homepage while it's hosted.
+    const port = hosts.portFor(dir);
+    const state = hosts.runtimeState(dir);
+    const url = port && state && state.status === 'ready' ? `http://localhost:${port}/` : null;
+    const thumb = await makeThumb(dir, out, { url });
     invalidate(dir);
     return thumb ? pathToFileURL(thumb).href + '?t=' + Date.now() : null;
   });
@@ -650,10 +794,12 @@ function registerIpc() {
       ...(offerRaw ? { checkboxLabel: 'Also delete the raw snapshot it was extracted from', checkboxChecked: false } : {}),
     });
     if (response !== 0) return false;
+    tunnels.stop(dir);
     hosts.stop(dir);
     await trashWithRetry(dir);
     log.info('deleted', dir);
     if (offerRaw && checkboxChecked) {
+      tunnels.stop(rawDir);
       hosts.stop(rawDir);
       await trashWithRetry(rawDir);
       log.info('deleted', rawDir);
@@ -850,9 +996,15 @@ function runSelfTest() {
       if (show) {
         const clicks = {
           options: ['#btnOptions'],
-          studio: ['#tab-studio'],
+          studio: ['#doctorClose', '#tab-studio'],
           commands: ['#btnPalette'],
           settings: ['#btnSettings'],
+          // The first card's menu, then its first item — "How to serve this…"
+          // on a local project.
+          runtime: ['#doctorClose', '#tab-studio', '.card .menu-btn', '.menu-pop button'],
+          // Host the first card for real. A project that runs a dev server is
+          // only proven by watching its badge stop saying "starting…".
+          hosting: ['#doctorClose', '#tab-studio', '.card .host-btn'],
         }[show];
         if (!clicks) throw new Error(`Unknown SLURP_SELFTEST_SHOW: ${show}`);
         await win.webContents.executeJavaScript(`(() => {
@@ -860,6 +1012,19 @@ function runSelfTest() {
           return true;
         })()`);
         await sleep(700);
+
+        if (show === 'hosting') {
+          const deadline = Date.now() + 150000;
+          let badge = '';
+          do {
+            await sleep(1000);
+            badge = await win.webContents.executeJavaScript(
+              '((document.querySelector(".badge.live") || {}).textContent || "").trim()');
+          } while ((!badge || /starting/i.test(badge)) && Date.now() < deadline);
+          log.info('selftest hosting badge:', badge);
+          if (!/^localhost:\d+$/.test(badge)) failure = 'the hosted site never came up: ' + badge;
+          await sleep(1500); // let the thumbnail land before the screenshot
+        }
       }
 
       const img = await win.webContents.capturePage();
@@ -870,6 +1035,11 @@ function runSelfTest() {
       log.error('selftest failed', err);
       failure = err.message;
     }
+    // app.exit skips before-quit, so anything the run started has to be taken
+    // down here — a leaked dev server would outlive the app that spawned it.
+    tunnels.stopAll();
+    hosts.stopAll();
+    await sleep(600);
     if (failure) {
       console.error('SELFTEST FAIL: ' + failure);
       app.exit(1);
@@ -920,7 +1090,14 @@ if (!app.requestSingleInstanceLock()) {
     for (const project of projects.all()) {
       if (!project.autoStart) continue;
       try {
-        const port = await hosts.start(project.path, project.port, { liveReload: !!project.liveReload });
+        const runtime = projects.runtimeFor(project);
+        if (runtime.kind === 'command' && runtimes.needsInstall(project.path, runtime)) {
+          log.warn('auto-host skipped', project.path, 'dependencies not installed');
+          continue;
+        }
+        const port = await hosts.start(project.path, project.port, {
+          liveReload: !!project.liveReload, runtime, name: project.name,
+        });
         if (port !== project.port) projects.update(project.id, { port });
         log.info('auto-hosting', project.path, port);
       } catch (err) {
@@ -941,8 +1118,18 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', () => {
     if (job) job.controller.abort();
+    tunnels.stopAll();
     hosts.stopAll();
   });
+  // Ctrl+C in the terminal during development never reaches before-quit, and a
+  // dev server we started would keep running with nothing left to stop it.
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(signal, () => {
+      tunnels.stopAll();
+      hosts.stopAll();
+      setTimeout(() => app.exit(0), 400);
+    });
+  }
   app.on('window-all-closed', () => app.quit());
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
 }

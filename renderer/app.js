@@ -344,6 +344,13 @@ function stopRunPanel(kind, message) {
 }
 
 window.snap.on('run:log', text => {
+  // A dependency install is started from the runtime panel, so its output
+  // belongs there and not on a tab the user would have to go looking for.
+  if (rt.capturing) {
+    const box = $('#rtLog');
+    box.textContent += text + '\n';
+    box.scrollTop = box.scrollHeight;
+  }
   const el = $('#runLog');
   const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
   el.textContent += text + '\n';
@@ -361,8 +368,43 @@ window.snap.on('run:progress', ({ done, total, page }) => {
     : `Extracted ${done}/${total} pages`;
 });
 
+// The dev server behind a card reports as it boots. A full refresh happens when
+// it lands (main sends ui:refresh); until then just keep the badge honest.
+window.snap.on('runtime:state', ({ dir, status, message }) => {
+  const card = [...document.querySelectorAll('.card')].find(c => c.dataset.dir === dir);
+  const badge = card && card.querySelector('.badge.live');
+  if (!badge) return;
+  badge.classList.toggle('booting', status === 'starting');
+  badge.classList.toggle('missing', status === 'failed');
+  const site = state.library && state.library.sites.find(s => s.dir === dir);
+  badge.textContent = status === 'starting' ? 'starting…'
+    : status === 'failed' ? 'failed to start'
+      : 'localhost:' + ((site && site.port) || '');
+  badge.title = message || 'Open in browser';
+});
+
 window.snap.on('zip:progress', ({ done, total }) => {
   if (state.zipToast) state.zipToast.textContent = `Zipping ${done}/${total}…`;
+});
+
+// The tunnel engine is fetched once, on the very first share — a ~60MB download
+// the toast narrates so the wait doesn't read as a hang.
+window.snap.on('share:download', ({ done, total }) => {
+  if (!state.shareToast) return;
+  const mb = n => Math.round(n / 1048576);
+  state.shareToast.textContent = total
+    ? `First share: downloading the tunnel engine — ${mb(done)} of ${mb(total)} MB…`
+    : `First share: downloading the tunnel engine — ${mb(done)} MB…`;
+});
+
+// A tunnel that dies on its own (network drop) reports here; main also sends
+// ui:refresh, so this only keeps the badge honest until the refresh lands.
+window.snap.on('share:state', ({ dir, status, url }) => {
+  const card = [...document.querySelectorAll('.card')].find(c => c.dataset.dir === dir);
+  if (!card) return;
+  const badge = card.querySelector('.badge.public');
+  if (badge && status !== 'up') badge.remove();
+  if (badge && status === 'up') badge.title = url;
 });
 
 window.snap.on('run:busy', ({ busy }) => {
@@ -371,7 +413,13 @@ window.snap.on('run:busy', ({ busy }) => {
   $('#tab-extractor').classList.toggle('busy', busy);
 });
 
-window.snap.on('run:done', async ({ ok, dir, stats, error, canceled, seconds }) => {
+window.snap.on('run:done', async ({ ok, dir, stats, error, canceled, seconds, install }) => {
+  // An install has no capture stats to summarise — it either worked or it said why.
+  if (install) {
+    stopRunPanel(ok ? 'done' : 'fail', ok ? 'Dependencies installed.' : 'Install failed: ' + error);
+    await refreshLibrary();
+    return;
+  }
   if (ok) {
     const summary = `${stats.pages} page${stats.pages === 1 ? '' : 's'}, ${stats.images} images, `
       + `${stats.fonts} fonts, ${stats.css} css${seconds ? ` — ${seconds}s` : ''}`;
@@ -388,11 +436,35 @@ window.snap.on('run:done', async ({ ok, dir, stats, error, canceled, seconds }) 
 });
 
 /* ---------- hosting ---------- */
-async function hostSite(dir) {
+async function hostSite(dir, site = null) {
+  // A project that runs a dev server can't start without its dependencies.
+  // Better to offer the install than to let the boot page show a crash.
+  if (site && site.needsInstall && site.runtime && site.runtime.install) {
+    const yes = await invoke('shell:confirm', {
+      title: 'Install dependencies',
+      message: `"${site.name}" hasn't had its dependencies installed yet.`,
+      detail: `Run "${site.runtime.install}" in ${site.dir} now? This can take a few minutes.`,
+      confirmLabel: 'Install',
+    });
+    if (!yes) return;
+    startRunPanel('Installing dependencies…');
+    try {
+      await invoke('project:install', { id: site.projectId });
+    } catch (err) {
+      stopRunPanel('fail', err.message);
+      failed(err);
+      return;
+    }
+    await refreshLibrary();
+  }
   try {
     const { port, url } = await invoke('host:start', { dir });
     if (!state.settings || state.settings.openAfterHost) await invoke('open:url', { url });
-    toast(`Hosting on localhost:${port}`, { kind: 'ok', action: { label: 'Open', fn: () => invoke('open:url', { url }) } });
+    const booting = site && site.runtime && site.runtime.kind === 'command';
+    toast(booting
+      ? `Starting ${site.runtime.label} on localhost:${port} — the page turns into the site when it's up`
+      : `Hosting on localhost:${port}`,
+    { kind: 'ok', timeout: booting ? 9000 : undefined, action: { label: 'Open', fn: () => invoke('open:url', { url }) } });
     await refreshLibrary();
   } catch (err) {
     failed(err);
@@ -401,6 +473,35 @@ async function hostSite(dir) {
 
 async function stopSite(dir) {
   await invoke('host:stop', { dir }).catch(failed);
+  await refreshLibrary();
+}
+
+/* ---------- public sharing ---------- */
+// One click on the share toggle puts the hosted port online through a
+// Cloudflare quick tunnel and hands back an https link; the same click takes
+// it down. The link is random on purpose — shareable, not guessable.
+async function shareSite(site) {
+  const pending = toast(`Creating a public link for "${site.name}"…`, { timeout: 0 });
+  state.shareToast = pending.querySelector('span');
+  try {
+    const { url } = await invoke('share:start', { dir: site.dir });
+    pending.remove();
+    toast(`${site.name} is public at ${url.replace('https://', '')} — the link works until sharing or hosting stops`, {
+      kind: 'ok', timeout: 15000,
+      action: { label: 'Copy link', fn: () => navigator.clipboard.writeText(url) },
+    });
+  } catch (err) {
+    pending.remove();
+    failed(err);
+  } finally {
+    state.shareToast = null;
+  }
+  await refreshLibrary();
+}
+
+async function unshareSite(site) {
+  await invoke('share:stop', { dir: site.dir }).catch(failed);
+  toast('Public link taken down', { kind: 'ok', timeout: 3000 });
   await refreshLibrary();
 }
 
@@ -503,9 +604,14 @@ function menuButton(items) {
   return b;
 }
 
+// A project that runs a process is either booting, up, or broken — and that
+// matters more on the card than "how many HTML files are in the folder".
+const runState = site => (site.runtimeState && site.runtimeState.kind === 'command' ? site.runtimeState : null);
+
 function renderCard(site) {
   const card = document.createElement('div');
   card.className = 'card';
+  card.dataset.dir = site.dir;
 
   const thumb = document.createElement('div');
   thumb.className = 'thumb';
@@ -522,10 +628,19 @@ function renderCard(site) {
     thumb.appendChild(letter);
   }
   const badge = document.createElement('span');
+  const running = runState(site);
+  const shared = site.share && site.share.status === 'up' && site.port ? site.share : null;
   if (site.port) {
     badge.className = 'badge live';
     badge.textContent = 'localhost:' + site.port;
     badge.title = 'Open in browser';
+    // A dev server takes a moment to come up; the badge says so rather than
+    // promising an address that isn't answering yet.
+    if (running && running.status !== 'ready') {
+      badge.classList.add(running.status === 'failed' ? 'missing' : 'booting');
+      badge.textContent = running.status === 'failed' ? 'failed to start' : 'starting…';
+      badge.title = running.message || '';
+    }
     badge.addEventListener('click', e => {
       e.stopPropagation();
       invoke('open:url', { url: `http://localhost:${site.port}/` }).catch(failed);
@@ -535,12 +650,23 @@ function renderCard(site) {
   else if (site.kind === 'extracted') { badge.className = 'badge extracted'; badge.textContent = 'extracted'; }
   else { badge.className = 'badge'; badge.textContent = 'raw'; }
   thumb.appendChild(badge);
+  if (shared) {
+    const pub = document.createElement('span');
+    pub.className = 'badge public';
+    pub.textContent = 'public';
+    pub.title = shared.url + ' — open the public link';
+    pub.addEventListener('click', e => {
+      e.stopPropagation();
+      invoke('open:url', { url: shared.url }).catch(failed);
+    });
+    thumb.appendChild(pub);
+  }
   if (!site.missing && (site.kind === 'extracted' || site.kind === 'local' || site.port)) {
     thumb.classList.add('clickable');
     thumb.title = 'Open this site';
     thumb.addEventListener('click', () => (site.port
       ? invoke('open:url', { url: `http://localhost:${site.port}/` })
-      : hostSite(site.dir)));
+      : hostSite(site.dir, site)));
   }
   card.appendChild(thumb);
 
@@ -552,10 +678,16 @@ function renderCard(site) {
   name.title = site.sourceUrl ? `${site.folder}\n${site.sourceUrl}` : site.dir;
   const meta = document.createElement('div');
   meta.className = 'card-meta';
+  // "0 pages" is a lie about a Next.js app — it has no HTML until it runs. What
+  // that card should say is what will be run.
+  const command = site.runtime && site.runtime.kind === 'command' ? site.runtime : null;
   meta.textContent = site.missing
     ? 'folder not found on disk'
-    : `${site.pages} page${site.pages === 1 ? '' : 's'} · ${fileSize(site.sizeBytes)} · `
-      + new Date(site.mtime).toLocaleDateString();
+    : command
+      ? `${command.label}${site.needsInstall ? ' · needs install' : ''} · ${fileSize(site.sizeBytes)}`
+      : `${site.pages} page${site.pages === 1 ? '' : 's'} · ${fileSize(site.sizeBytes)} · `
+        + new Date(site.mtime).toLocaleDateString();
+  if (command) meta.title = command.command || '';
   body.appendChild(name);
   body.appendChild(meta);
 
@@ -598,6 +730,24 @@ function renderCard(site) {
   };
 
   const more = [];
+  // For a folder that isn't just HTML, "how does this get served" is the first
+  // thing anyone needs — it comes before the file-manager actions.
+  if (site.kind === 'local' && site.projectId) {
+    more.push({ icon: 'gear', label: 'How to serve this…', fn: () => openRuntime(site) });
+    if (site.port && site.runtime && site.runtime.kind === 'command') {
+      more.push({ icon: 'refresh', label: 'Restart server', fn: async () => {
+        await invoke('runtime:restart', { dir: site.dir });
+        toast('Restarting…', { kind: 'ok', timeout: 3000 });
+        await refreshLibrary();
+      } });
+    }
+  }
+  if (shared) {
+    more.push({ icon: 'share', label: 'Copy public link', fn: async () => {
+      await navigator.clipboard.writeText(shared.url);
+      toast('Public link copied', { kind: 'ok', timeout: 2500 });
+    } });
+  }
   if (site.port && site.hasSitemap) {
     more.push({ icon: 'map', label: 'Open sitemap', fn: () =>
       invoke('open:url', { url: `http://localhost:${site.port}/_index.html` }) });
@@ -618,10 +768,14 @@ function renderCard(site) {
   }
   if (site.projectId) {
     more.push({ icon: 'history', label: 'Review history', fn: () => openHistory(site) });
-    more.push({ icon: 'refresh', label: site.liveReload ? 'Live reload: on' : 'Live reload: off', fn: async () => {
-      await invoke('project:setLiveReload', { id: site.projectId, liveReload: !site.liveReload });
-      await refreshLibrary();
-    } });
+    // A dev server does its own hot reload — SiteSlurp's file watcher would only
+    // fight it, so the toggle is a static-hosting option.
+    if (!command) {
+      more.push({ icon: 'refresh', label: site.liveReload ? 'Live reload: on' : 'Live reload: off', fn: async () => {
+        await invoke('project:setLiveReload', { id: site.projectId, liveReload: !site.liveReload });
+        await refreshLibrary();
+      } });
+    }
     more.push({ icon: 'check', label: site.autoStart ? 'Auto-start: on' : 'Auto-start: off', fn: async () => {
       await invoke('project:setAutoStart', { id: site.projectId, autoStart: !site.autoStart });
       await refreshLibrary();
@@ -644,8 +798,14 @@ function renderCard(site) {
     actions.appendChild(textButton('stop', 'Stop', () => stopSite(site.dir)));
     actions.appendChild(iconBtn('open', 'Open in browser', () =>
       invoke('open:url', { url: `http://localhost:${site.port}/` })));
+    const shareBtn = iconBtn('share', shared
+      ? 'Stop sharing — the public link stops working'
+      : 'Share publicly — creates an https link anyone can open', () =>
+      (shared ? unshareSite(site) : shareSite(site)));
+    if (shared) shareBtn.classList.add('sharing');
+    actions.appendChild(shareBtn);
   } else if (!site.missing) {
-    actions.appendChild(textButton('globe', 'Host', () => hostSite(site.dir)));
+    actions.appendChild(textButton('globe', 'Host', () => hostSite(site.dir, site)));
   }
   if (site.projectId && !site.missing) {
     actions.appendChild(iconBtn('note', 'Review this site (annotate + export a spec)', async () => {
@@ -734,7 +894,7 @@ function renderRecent() {
       row.appendChild(textButton('open', 'Open', () =>
         invoke('open:url', { url: `http://localhost:${site.port}/` })));
     } else {
-      row.appendChild(textButton('globe', 'Host', () => hostSite(site.dir)));
+      row.appendChild(textButton('globe', 'Host', () => hostSite(site.dir, site)));
     }
     list.appendChild(row);
   }
@@ -833,6 +993,160 @@ async function openHistory(site) {
   $('#historyModal').classList.remove('hidden');
 }
 $('#historyClose').addEventListener('click', () => $('#historyModal').classList.add('hidden'));
+
+/* ---------- runtime: how a project gets served ----------
+   A folder of HTML is served straight off disk, everything else needs a
+   process. This panel is where that choice lives: what SiteSlurp detected,
+   what it will actually run, and — while the site is hosted — what that
+   process is saying. */
+const rt = { site: null, list: [], timer: null, capturing: false };
+const rtKey = runtime => `${runtime.kind}:${runtime.id}`;
+
+function rtSelected() {
+  return rt.list.find(c => rtKey(c) === $('#rtPick').value) || rt.list[0] || null;
+}
+
+/** Show the fields the chosen runtime actually uses. */
+function rtRenderChoice(runtime, { command, appPort } = {}) {
+  const isCommand = runtime && runtime.kind === 'command';
+  $('#rtCommandRow').classList.toggle('hidden', !isCommand);
+  $('#rtPortRow').classList.toggle('hidden', !isCommand);
+  if (isCommand) {
+    $('#rtCommand').value = command !== undefined ? command : (runtime.command || '');
+    $('#rtAppPort').value = appPort || runtime.appPort || '';
+  }
+  const install = isCommand && runtime.install;
+  $('#rtInstallRow').classList.toggle('hidden', !install);
+  if (install) {
+    $('#rtInstallText').textContent = rt.needsInstall
+      ? `Dependencies aren't installed yet — run "${runtime.install}".`
+      : `Dependencies look installed. Run "${runtime.install}" again if they're stale.`;
+  }
+  $('#rtDetected').textContent = runtime && runtime.note
+    ? runtime.note
+    : rt.detected
+      ? `Detected: ${rt.detected.label}.`
+      : 'Nothing recognisable in this folder — set a command that starts it.';
+}
+
+function rtRenderState(runtimeState) {
+  const box = $('#rtStatus');
+  const logEl = $('#rtLog');
+  if (!runtimeState || runtimeState.kind !== 'command') {
+    box.classList.add('hidden');
+    $('#rtRestart').classList.add('hidden');
+    if (!rt.capturing) logEl.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+  box.className = 'rt-status ' + runtimeState.status;
+  box.textContent = runtimeState.message || runtimeState.status;
+  $('#rtRestart').classList.toggle('hidden', false);
+  if (runtimeState.log) {
+    const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24;
+    logEl.classList.remove('hidden');
+    logEl.textContent = runtimeState.log;
+    if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  }
+}
+
+function rtPoll() {
+  clearInterval(rt.timer);
+  rt.timer = setInterval(async () => {
+    if (!rt.site || $('#runtimeModal').classList.contains('hidden')) { clearInterval(rt.timer); return; }
+    const runtimeState = await invoke('runtime:state', { dir: rt.site.dir }).catch(() => null);
+    rtRenderState(runtimeState);
+  }, 1200);
+}
+
+async function openRuntime(site) {
+  const info = await invoke('project:runtimes', { id: site.projectId });
+  rt.site = site;
+  rt.detected = info.detected;
+  rt.needsInstall = info.needsInstall;
+
+  // Everything we could run, with whatever is set now first — a hand-edited
+  // command must not disappear because detection has other ideas.
+  rt.list = info.candidates.slice();
+  if (!rt.list.some(c => rtKey(c) === rtKey(info.current))) rt.list.unshift({ ...info.current });
+
+  const pick = $('#rtPick');
+  pick.innerHTML = '';
+  for (const candidate of rt.list) {
+    const option = document.createElement('option');
+    option.value = rtKey(candidate);
+    option.textContent = candidate.label
+      + (info.detected && rtKey(info.detected) === rtKey(candidate) ? ' — detected' : '');
+    pick.appendChild(option);
+  }
+  pick.value = rtKey(info.current);
+  $('#rtName').textContent = info.name;
+  rtRenderChoice(info.current, { command: info.current.command, appPort: info.current.appPort });
+  $('#rtLog').textContent = '';
+  rtRenderState(info.state);
+  $('#runtimeModal').classList.remove('hidden');
+  rtPoll();
+}
+
+$('#rtPick').addEventListener('change', () => {
+  const chosen = rtSelected();
+  // Switching runtime means taking that runtime's command, not keeping the
+  // previous one — except for "custom", which is whatever the user types.
+  rtRenderChoice(chosen, chosen && chosen.id === 'custom' ? { command: $('#rtCommand').value } : {});
+});
+
+$('#rtInstall').addEventListener('click', async () => {
+  const button = $('#rtInstall');
+  button.disabled = true;
+  rt.capturing = true;
+  $('#rtLog').textContent = '';
+  $('#rtLog').classList.remove('hidden');
+  try {
+    await invoke('project:install', { id: rt.site.projectId });
+    rt.needsInstall = false;
+    toast('Dependencies installed', { kind: 'ok' });
+    rtRenderChoice(rtSelected(), { command: $('#rtCommand').value, appPort: $('#rtAppPort').value });
+    await refreshLibrary();
+  } catch (err) {
+    failed(err);
+  } finally {
+    rt.capturing = false;
+    button.disabled = false;
+  }
+});
+
+$('#rtRestart').addEventListener('click', async () => {
+  try {
+    await invoke('runtime:restart', { dir: rt.site.dir });
+    toast('Restarting the server…', { kind: 'ok', timeout: 3000 });
+  } catch (err) { failed(err); }
+});
+
+$('#rtSave').addEventListener('click', async () => {
+  const chosen = rtSelected();
+  if (!chosen) return;
+  const runtime = { ...chosen };
+  if (runtime.kind === 'command') {
+    runtime.command = $('#rtCommand').value.trim();
+    const appPort = parseInt($('#rtAppPort').value, 10);
+    if (appPort > 0) runtime.appPort = appPort; else delete runtime.appPort;
+    if (!runtime.command) { failed(new Error('Enter the command that starts this site.')); return; }
+  }
+  try {
+    await invoke('project:setRuntime', { id: rt.site.projectId, runtime });
+    $('#runtimeModal').classList.add('hidden');
+    clearInterval(rt.timer);
+    toast(`"${rt.site.name}" will be served as ${runtime.label}`, { kind: 'ok' });
+    await refreshLibrary();
+  } catch (err) {
+    failed(err);
+  }
+});
+
+$('#rtCancel').addEventListener('click', () => {
+  $('#runtimeModal').classList.add('hidden');
+  clearInterval(rt.timer);
+});
 
 window.snap.on('review:exported', ({ project, folder }) => {
   toast(`Review of ${project} exported`, {
@@ -999,7 +1313,7 @@ function allCommands() {
         fn: () => invoke('open:url', { url: `http://localhost:${site.port}/` }).catch(failed) });
       list.push({ group: 'sites', icon: 'stop', label: `Stop ${site.name}`, fn: () => stopSite(site.dir) });
     } else if (site.kind !== 'raw') {
-      list.push({ group: 'sites', icon: 'globe', label: `Host ${site.name}`, fn: () => hostSite(site.dir) });
+      list.push({ group: 'sites', icon: 'globe', label: `Host ${site.name}`, fn: () => hostSite(site.dir, site) });
     }
   }
   if (state.library.sites.some(s => s.port)) {
@@ -1120,7 +1434,7 @@ document.addEventListener('keydown', e => {
 });
 
 // Click the backdrop to dismiss a modal.
-for (const id of ['cmdModal', 'settingsModal', 'doctorModal', 'aboutModal', 'historyModal']) {
+for (const id of ['cmdModal', 'settingsModal', 'doctorModal', 'aboutModal', 'historyModal', 'runtimeModal']) {
   document.getElementById(id).addEventListener('click', e => {
     if (e.target.id === id) e.target.classList.add('hidden');
   });
