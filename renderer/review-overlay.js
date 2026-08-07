@@ -381,10 +381,15 @@
 
     function refreshSave() {
       const d = state.draft.input;
+      // A pinned snapshot view is read-only: notes describe the live version.
+      const pinnedView = !!(state.config && state.config.pinned);
       const blocked = d.rating !== null && d.why.trim().length < (state.config ? state.config.minWhy : 10);
-      save.disabled = blocked;
-      err.style.display = blocked ? 'block' : 'none';
-      err.textContent = blocked ? 'A rating needs a reason — a number alone isn\'t actionable.' : '';
+      save.disabled = blocked || pinnedView;
+      save.title = pinnedView ? 'Annotations target the live version — use "Back to live" first.' : '';
+      err.style.display = (blocked || pinnedView) ? 'block' : 'none';
+      err.textContent = pinnedView
+        ? 'Viewing a snapshot — annotations target the live version.'
+        : blocked ? 'A rating needs a reason — a number alone isn\'t actionable.' : '';
     }
     refreshSave();
 

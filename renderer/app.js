@@ -183,6 +183,7 @@ async function openSettings() {
   $('#setRoot').value = settings.capturesRoot;
   $('#setPort').value = settings.defaultPort;
   $('#setOpenAfterHost').checked = settings.openAfterHost;
+  $('#setSnapIdle').value = settings.autoSnapshotIdleSec;
   $('#setSf').value = settings.singleFilePath || '';
   $('#setSf').placeholder = env.singleFile.path || 'not found';
   $('#setSfStatus').textContent = env.singleFile.ok ? '(ready)' : '(missing)';
@@ -237,6 +238,7 @@ $('#setSave').addEventListener('click', async () => {
       singleFilePath: $('#setSf').value.trim(),
       defaultPort: parseInt($('#setPort').value, 10) || 8008,
       openAfterHost: $('#setOpenAfterHost').checked,
+      autoSnapshotIdleSec: parseInt($('#setSnapIdle').value, 10) || 45,
     });
     $('#settingsModal').classList.add('hidden');
     await refreshEnv();
@@ -778,12 +780,23 @@ function renderCard(site) {
         await refreshLibrary();
       } });
     }
-    more.push({ icon: 'history', label: 'Review history', fn: () => openHistory(site) });
+    // A restorable copy of the files as they are right now.
+    if (!site.missing) {
+      more.push({ icon: 'layers', label: 'Snapshot now…', fn: () => openSnapshotPrompt(site) });
+    }
+    more.push({ icon: 'history', label: 'Project history', fn: () => openHistory(site) });
     // A dev server does its own hot reload — SiteSlurp's file watcher would only
     // fight it, so the toggle is a static-hosting option.
     if (!command) {
       more.push({ icon: 'refresh', label: site.liveReload ? 'Live reload: on' : 'Live reload: off', fn: async () => {
         await invoke('project:setLiveReload', { id: site.projectId, liveReload: !site.liveReload });
+        await refreshLibrary();
+      } });
+    }
+    // Snapshot on its own after edits go quiet, while the site is hosted.
+    if (!site.missing) {
+      more.push({ icon: 'layers', label: site.autoSnapshot ? 'Auto-snapshot: on' : 'Auto-snapshot: off', fn: async () => {
+        await invoke('project:setAutoSnapshot', { id: site.projectId, autoSnapshot: !site.autoSnapshot });
         await refreshLibrary();
       } });
     }
@@ -972,10 +985,35 @@ $('#libShowRaw').addEventListener('change', e => {
   renderLibrary();
 });
 
-/* ---------- review history ---------- */
-async function openHistory(site) {
+/* ---------- project history: reviews + versions ----------
+   One modal, two tabs — everything a site has been through. Reviews are the
+   existing history; Versions is the snapshot timeline from the Phase-2
+   engine: restore, pin & view, diff. */
+const hist = { site: null, tab: 'reviews', snapshots: [], diff: null };
+
+function histSetTab(tab) {
+  hist.tab = tab;
+  $('#histTabReviews').classList.toggle('on', tab === 'reviews');
+  $('#histTabReviews').setAttribute('aria-selected', String(tab === 'reviews'));
+  $('#histTabVersions').classList.toggle('on', tab === 'versions');
+  $('#histTabVersions').setAttribute('aria-selected', String(tab === 'versions'));
+  $('#historyList').classList.toggle('hidden', tab !== 'reviews');
+  $('#versionsPane').classList.toggle('hidden', tab !== 'versions');
+}
+
+async function openHistory(site, tab = 'reviews') {
+  hist.site = site;
+  $('#historyTitle').textContent = `Project history — ${site.name}`;
+  $('#diffPane').classList.add('hidden');
+  $('#versionsList').classList.remove('hidden');
+  histSetTab(tab);
+  await renderReviewHistory(site);
+  if (tab === 'versions') await renderVersions(site);
+  $('#historyModal').classList.remove('hidden');
+}
+
+async function renderReviewHistory(site) {
   const { reviews } = await invoke('review:history', { id: site.projectId });
-  $('#historyTitle').textContent = `Review history — ${site.name}`;
   const list = $('#historyList');
   list.innerHTML = '';
   if (!reviews.length) {
@@ -1004,7 +1042,7 @@ async function openHistory(site) {
           kind: 'ok', timeout: 12000,
           action: { label: 'Open folder', fn: () => invoke('open:folder', { dir: folder }) },
         });
-        await openHistory(site); // the row's exported state just changed
+        await renderReviewHistory(site); // the row's exported state just changed
       }));
     }
     if (review.exportFolder) {
@@ -1014,9 +1052,314 @@ async function openHistory(site) {
     row.appendChild(actions);
     list.appendChild(row);
   }
-  $('#historyModal').classList.remove('hidden');
 }
 $('#historyClose').addEventListener('click', () => $('#historyModal').classList.add('hidden'));
+$('#histTabReviews').addEventListener('click', () => histSetTab('reviews'));
+$('#histTabVersions').addEventListener('click', async () => {
+  histSetTab('versions');
+  if (hist.site) await renderVersions(hist.site);
+});
+
+/* ---------- versions tab ---------- */
+const SOURCE_LABELS = { manual: 'manual', auto: 'auto', palette: 'recolor', 'pre-restore': 'pre-restore', capture: 'capture' };
+
+function versionStamp(snap) {
+  const date = new Date(snap.timestamp);
+  return isNaN(date.getTime())
+    ? snap.id
+    : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+// Pinned viewing only exists for sites served straight off their files.
+const canPinSite = site => !(site.runtime && site.runtime.kind === 'command');
+
+async function renderVersions(site) {
+  const list = $('#versionsList');
+  $('#diffPane').classList.add('hidden');
+  list.classList.remove('hidden');
+  $('#versionsHint').textContent = canPinSite(site)
+    ? 'Every snapshot is restorable — restoring saves the current state first. Pin & view shows an old version in the browser while live serving stays untouched.'
+    : 'Snapshots cover this project\'s source files. Pin & view is off for dev-server projects — their pages aren\'t a pure function of the files on disk.';
+  list.innerHTML = '<div class="history-empty">Loading…</div>';
+  let result;
+  try {
+    result = await invoke('version:list', { id: site.projectId });
+  } catch (err) {
+    list.innerHTML = '';
+    failed(err);
+    return;
+  }
+  hist.snapshots = result.snapshots;
+  list.innerHTML = '';
+  if (!result.snapshots.length) {
+    list.innerHTML = '<div class="history-empty">No snapshots yet — "Snapshot now…" is in the card\'s ⋯ menu, and hosted sites snapshot themselves once your edits go quiet.</div>';
+    return;
+  }
+  for (const snap of result.snapshots) {
+    const row = document.createElement('div');
+    row.className = 'history-row';
+    const info = document.createElement('div');
+    const badge = document.createElement('span');
+    badge.className = 'ver-badge ver-' + snap.source;
+    badge.textContent = SOURCE_LABELS[snap.source] || snap.source;
+    const title = document.createElement('strong');
+    title.textContent = snap.label || versionStamp(snap);
+    const meta = document.createElement('span');
+    meta.className = 'mini';
+    meta.textContent = ` ${snap.label ? versionStamp(snap) + ' · ' : ''}`
+      + `${snap.stats.files} file${snap.stats.files === 1 ? '' : 's'} · ${fileSize(snap.stats.bytes)}`
+      + (snap.stats.newBlobs ? ` · ${snap.stats.newBlobs} new` : '');
+    info.appendChild(badge);
+    info.appendChild(title);
+    info.appendChild(meta);
+    row.appendChild(info);
+    const actions = document.createElement('div');
+    actions.className = 'history-actions';
+    actions.appendChild(iconBtn('code', 'Diff against… — see what changed', () => openDiff(site, snap)));
+    if (canPinSite(site)) {
+      actions.appendChild(iconBtn('open', 'Pin & view — open the browser on this snapshot', () => pinAndView(site, snap)));
+    }
+    actions.appendChild(iconBtn('undo', 'Restore — make the files match this snapshot (the current state is snapshotted first)', () => restoreVersion(site, snap)));
+    row.appendChild(actions);
+    list.appendChild(row);
+  }
+}
+
+async function pinAndView(site, snap) {
+  let port = site.port;
+  if (!port) {
+    ({ port } = await invoke('host:start', { dir: site.dir }));
+    await refreshLibrary();
+  }
+  await invoke('open:url', { url: `http://localhost:${port}/?v=${encodeURIComponent(snap.id)}` });
+}
+
+async function restoreVersion(site, snap) {
+  const yes = await invoke('shell:confirm', {
+    title: 'Restore snapshot',
+    message: `Make "${site.name}" match this snapshot?`,
+    detail: `${snap.label || versionStamp(snap)}\n\nThe files as they are now get snapshotted first, so this is fully undoable.`,
+    confirmLabel: 'Restore',
+  });
+  if (!yes) return;
+  await invoke('version:restore', { id: site.projectId, versionId: snap.id });
+  toast('Restored — the previous state was snapshotted first', { kind: 'ok' });
+  await renderVersions(site);
+  await refreshLibrary();
+}
+
+/* ---------- diff view ---------- */
+const IMAGE_MIME = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', avif: 'image/avif', ico: 'image/x-icon', bmp: 'image/bmp',
+};
+const extOf = p => String(p).toLowerCase().split('.').pop();
+const isImagePath = p => !!IMAGE_MIME[extOf(p)];
+
+const emptyNote = text => {
+  const el = document.createElement('div');
+  el.className = 'history-empty';
+  el.textContent = text;
+  return el;
+};
+
+async function openDiff(site, snap) {
+  hist.diff = { site, a: snap.id };
+  $('#versionsList').classList.add('hidden');
+  $('#diffPane').classList.remove('hidden');
+  $('#diffTitle').textContent = snap.label || versionStamp(snap);
+  const pick = $('#diffAgainst');
+  pick.innerHTML = '';
+  const options = [
+    { id: 'working', label: 'the working files (now)' },
+    ...hist.snapshots.filter(s => s.id !== snap.id)
+      .map(s => ({ id: s.id, label: s.label || versionStamp(s) })),
+  ];
+  for (const option of options) {
+    const el = document.createElement('option');
+    el.value = option.id;
+    el.textContent = option.label;
+    pick.appendChild(el);
+  }
+  pick.value = 'working';
+  await renderDiffFiles();
+}
+
+async function renderDiffFiles() {
+  if (!hist.diff) return;
+  const { site, a } = hist.diff;
+  const b = $('#diffAgainst').value;
+  $('#diffView').classList.add('hidden');
+  const box = $('#diffFiles');
+  box.innerHTML = '<div class="history-empty">Comparing…</div>';
+  let diff;
+  try {
+    diff = await invoke('version:diff', { id: site.projectId, a, b });
+  } catch (err) {
+    box.innerHTML = '';
+    failed(err);
+    return;
+  }
+  box.innerHTML = '';
+  const total = diff.added.length + diff.removed.length + diff.changed.length;
+  if (!total) {
+    box.appendChild(emptyNote('No differences — the two states are identical.'));
+    return;
+  }
+  for (const [label, files, kind] of [['Added', diff.added, 'add'], ['Removed', diff.removed, 'del'], ['Changed', diff.changed, 'chg']]) {
+    if (!files.length) continue;
+    const head = document.createElement('div');
+    head.className = 'diff-group';
+    head.textContent = `${label} (${files.length})`;
+    box.appendChild(head);
+    for (const file of files) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'diff-file ' + kind;
+      row.innerHTML = '<span class="diff-path"></span><span class="mini"></span>';
+      row.querySelector('.diff-path').textContent = file.path;
+      row.querySelector('.mini').textContent = kind === 'chg'
+        ? `${fileSize(file.sizeA)} → ${fileSize(file.sizeB)}`
+        : fileSize(file.size);
+      if (kind === 'chg') row.addEventListener('click', () => showFileDiff(file.path));
+      else row.disabled = true;
+      box.appendChild(row);
+    }
+  }
+}
+
+async function showFileDiff(relPath) {
+  const { site, a } = hist.diff;
+  const b = $('#diffAgainst').value;
+  const view = $('#diffView');
+  view.classList.remove('hidden');
+  view.innerHTML = '<div class="history-empty">Loading…</div>';
+
+  const name = document.createElement('div');
+  name.className = 'diff-file-name mini';
+  name.textContent = relPath;
+
+  if (isImagePath(relPath)) {
+    // Before/after side by side, both sides streamed out of the store.
+    try {
+      const [before, after] = await Promise.all([
+        invoke('version:readFile', { id: site.projectId, versionId: a, path: relPath }),
+        invoke('version:readFile', { id: site.projectId, versionId: b, path: relPath }),
+      ]);
+      view.innerHTML = '';
+      view.appendChild(name);
+      const pair = document.createElement('div');
+      pair.className = 'img-pair';
+      for (const [caption, payload] of [['Before', before], ['After', after]]) {
+        const cell = document.createElement('figure');
+        const img = document.createElement('img');
+        img.src = `data:${IMAGE_MIME[extOf(relPath)]};base64,${payload.base64}`;
+        img.alt = caption;
+        const cap = document.createElement('figcaption');
+        cap.className = 'mini';
+        cap.textContent = `${caption} · ${fileSize(payload.size)}`;
+        cell.appendChild(img);
+        cell.appendChild(cap);
+        pair.appendChild(cell);
+      }
+      view.appendChild(pair);
+    } catch (err) {
+      view.innerHTML = '';
+      failed(err);
+    }
+    return;
+  }
+
+  let result;
+  try {
+    result = await invoke('version:diff', { id: site.projectId, a, b, path: relPath });
+  } catch (err) {
+    view.innerHTML = '';
+    failed(err);
+    return;
+  }
+  view.innerHTML = '';
+  view.appendChild(name);
+  if (result.kind === 'binary') { view.appendChild(emptyNote('Binary file — no line diff.')); return; }
+  if (result.kind === 'large') { view.appendChild(emptyNote('Too large to diff here.')); return; }
+  if (!result.changed) { view.appendChild(emptyNote('The bytes differ but the lines match (line endings, most likely).')); return; }
+  const code = document.createElement('div');
+  code.className = 'diff-code';
+  for (const seg of result.segments) {
+    if (seg.kind === 'skip') {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = `${seg.lines.length} unchanged lines`;
+      details.appendChild(summary);
+      const inner = document.createElement('div');
+      for (const op of seg.lines) inner.appendChild(diffLineEl(op));
+      details.appendChild(inner);
+      code.appendChild(details);
+    } else {
+      for (const op of seg.lines) code.appendChild(diffLineEl(op));
+    }
+  }
+  view.appendChild(code);
+}
+
+function diffLineEl(op) {
+  const row = document.createElement('div');
+  row.className = 'dl' + (op.type === 'add' ? ' add' : op.type === 'del' ? ' del' : '');
+  const sign = document.createElement('span');
+  sign.className = 'sign';
+  sign.textContent = op.type === 'add' ? '+' : op.type === 'del' ? '−' : '';
+  const text = document.createElement('span');
+  text.className = 'txt';
+  text.textContent = op.line;
+  row.appendChild(sign);
+  row.appendChild(text);
+  return row;
+}
+
+$('#diffBack').addEventListener('click', () => {
+  $('#diffPane').classList.add('hidden');
+  $('#versionsList').classList.remove('hidden');
+});
+$('#diffAgainst').addEventListener('change', renderDiffFiles);
+
+/* ---------- snapshot prompt ---------- */
+const snapState = { site: null };
+
+function openSnapshotPrompt(site) {
+  snapState.site = site;
+  $('#snapName').textContent = '— ' + site.name;
+  $('#snapLabel').value = '';
+  $('#snapModal').classList.remove('hidden');
+  $('#snapLabel').focus();
+}
+
+$('#snapCancel').addEventListener('click', () => $('#snapModal').classList.add('hidden'));
+$('#snapLabel').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#snapSave').click(); }
+});
+$('#snapSave').addEventListener('click', async () => {
+  const site = snapState.site;
+  if (!site) return;
+  const button = $('#snapSave');
+  button.disabled = true;
+  try {
+    const result = await invoke('version:create', { id: site.projectId, label: $('#snapLabel').value.trim() });
+    $('#snapModal').classList.add('hidden');
+    if (result.unchanged) {
+      toast('No changes since the last snapshot — nothing new to save.', { timeout: 5000 });
+    } else {
+      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      toast(`Snapshot saved · ${time}`, {
+        kind: 'ok',
+        action: { label: 'History', fn: () => openHistory(site, 'versions') },
+      });
+    }
+  } catch (err) {
+    failed(err);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 /* ---------- calibration manager ----------
    Anchors and standing preferences were write-only until now. Each row edits
@@ -1408,26 +1751,44 @@ async function openPalette(site) {
   renderUndo(result.undo);
 }
 
+/* Recolor history: engine snapshots (source 'palette') plus any legacy
+   .siteslurp/undo entries old sites still carry, labelled and reverted
+   through their own old code path. */
 function renderUndo(entries) {
   const panel = $('#palUndo');
   const list = $('#palUndoList');
   list.innerHTML = '';
   panel.classList.toggle('hidden', !entries || !entries.length);
-  for (const entry of (entries || []).slice(0, 5)) {
+  for (const entry of (entries || []).slice(0, 6)) {
     const row = document.createElement('div');
     row.className = 'undo-row';
+    // Engine entries carry the colors in their label ("Before recolor #a → #b");
+    // legacy entries carry them as fields.
+    const hexes = entry.legacy
+      ? [entry.from, entry.to]
+      : (String(entry.label || '').match(/#[0-9a-fA-F]{3,8}/g) || []);
     const chips = document.createElement('span');
     chips.className = 'undo-chips';
-    chips.innerHTML = `<i style="background:${cssColor(entry.from)}"></i>&rarr;<i style="background:${cssColor(entry.to)}"></i>`;
+    chips.innerHTML = `<i style="background:${cssColor(hexes[0])}"></i>&rarr;<i style="background:${cssColor(hexes[1])}"></i>`;
     const label = document.createElement('span');
     label.className = 'undo-label';
-    label.textContent = `${entry.replaced} in ${entry.files.length} file${entry.files.length === 1 ? '' : 's'}`;
+    label.textContent = entry.legacy
+      ? `${entry.replaced} in ${entry.files.length} file${entry.files.length === 1 ? '' : 's'} · legacy`
+      : new Date(entry.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
     row.appendChild(chips);
     row.appendChild(label);
-    row.appendChild(iconBtn('undo', 'Revert this change', async () => {
-      const result = await invoke('palette:undo', { dir: state.paletteDir, id: entry.id });
-      toast(`Reverted ${result.restored} file${result.restored === 1 ? '' : 's'}`, { kind: 'ok' });
+    row.appendChild(iconBtn('undo', entry.legacy
+      ? 'Revert this change (legacy history)'
+      : 'Revert this change (restores the snapshot taken before it)', async () => {
       const site = state.library.sites.find(s => s.dir === state.paletteDir);
+      let restored;
+      if (entry.legacy) {
+        ({ restored } = await invoke('palette:undo', { dir: state.paletteDir, id: entry.id }));
+      } else {
+        if (!site || !site.projectId) throw new Error('This site is not in the library any more.');
+        ({ restored } = await invoke('version:restore', { id: site.projectId, versionId: entry.id }));
+      }
+      toast(`Reverted ${restored} file${restored === 1 ? '' : 's'}`, { kind: 'ok' });
       if (site) await openPalette(site);
       invoke('thumb:make', { dir: state.paletteDir }).then(refreshLibrary).catch(() => {});
     }));
@@ -1503,6 +1864,10 @@ function allCommands() {
       list.push({ group: 'sites', icon: 'open', label: `Open ${site.name} — localhost:${site.port}`,
         fn: () => invoke('open:url', { url: `http://localhost:${site.port}/` }).catch(failed) });
       list.push({ group: 'sites', icon: 'stop', label: `Stop ${site.name}`, fn: () => stopSite(site.dir) });
+      if (site.projectId) {
+        list.push({ group: 'sites', icon: 'layers', label: `Snapshot ${site.name}`,
+          fn: () => openSnapshotPrompt(site) });
+      }
     } else if (site.kind !== 'raw') {
       list.push({ group: 'sites', icon: 'globe', label: `Host ${site.name}`, fn: () => hostSite(site.dir, site) });
     }
@@ -1610,7 +1975,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeMenu();
     for (const sel of ['#cmdModal', '#settingsModal', '#doctorModal', '#aboutModal', '#paletteDrawer',
-      '#historyModal', '#calibrationModal', '#logModal', '#entryModal']) {
+      '#historyModal', '#calibrationModal', '#logModal', '#entryModal', '#snapModal']) {
       $(sel).classList.add('hidden');
     }
     clearInterval(logTimer);
@@ -1636,7 +2001,7 @@ document.addEventListener('keydown', e => {
 
 // Click the backdrop to dismiss a modal.
 for (const id of ['cmdModal', 'settingsModal', 'doctorModal', 'aboutModal', 'historyModal', 'runtimeModal',
-  'calibrationModal', 'logModal', 'entryModal']) {
+  'calibrationModal', 'logModal', 'entryModal', 'snapModal']) {
   document.getElementById(id).addEventListener('click', e => {
     if (e.target.id === id) e.target.classList.add('hidden');
   });

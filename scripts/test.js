@@ -25,7 +25,7 @@ require.cache[require.resolve('electron')] = {
   },
 };
 
-const { scanPalette, applyColor, undoColor, parseColor } = require('../lib/palette');
+const { scanPalette, applyColor, undoColor, listUndo, parseColor } = require('../lib/palette');
 const { extractSite, uniqueOutDir } = require('../lib/extract');
 const { zipFolder } = require('../lib/zip');
 const { makeHandler, HostManager } = require('../lib/server');
@@ -35,6 +35,8 @@ const runtimes = require('../lib/runtimes');
 const { portAnswers } = require('../lib/runner');
 const { resolveEntry } = require('../lib/entry');
 const { normalizeUrl, nameFromUrl, reserveCaptureDir } = require('../lib/capture');
+const versions = require('../lib/versions');
+const { watchFolder } = require('../lib/watch');
 const settings = require('../lib/settings');
 const projectsReg = require('../lib/projects');
 const { describeLocal } = require('../lib/library');
@@ -151,16 +153,34 @@ async function paletteTests() {
     ok(html.includes('#000'), 'target replaced');
   });
 
-  await check('undo restores the previous content', () => {
-    const dir = scratch('pal-undo');
+  await check('apply writes no undo folder of its own any more', () => {
+    // Undo is the versioning engine's job now (a 'palette'-sourced snapshot
+    // taken by the IPC layer before apply); the module just rewrites files.
+    const dir = scratch('pal-noundo');
+    fs.writeFileSync(path.join(dir, 'index.html'), '<i style="color:#ff0000">x</i>');
+    const result = applyColor(dir, '255,0,0', '#123456');
+    eq(result.replaced, 1);
+    ok(!fs.existsSync(path.join(dir, '.siteslurp')), 'no .siteslurp written by apply');
+  });
+
+  await check('legacy undo entries still list and restore through the old path', () => {
+    const dir = scratch('pal-legacy');
     const file = path.join(dir, 'index.html');
-    const before = '<i style="color:#ff0000">x</i>';
-    fs.writeFileSync(file, before);
-    applyColor(dir, '255,0,0', '#123456');
-    ok(fs.readFileSync(file, 'utf8') !== before, 'file changed');
+    fs.writeFileSync(file, '<i style="color:#123456">x</i>');
+    // A pre-engine recolor left this behind; the entry must stay visible and
+    // restorable even though nothing writes this format any more.
+    const undoDir = path.join(dir, '.siteslurp', 'undo', '2025-01-01T00-00-00-000Z');
+    fs.mkdirSync(undoDir, { recursive: true });
+    fs.writeFileSync(path.join(undoDir, 'index.html'), '<i style="color:#ff0000">x</i>');
+    fs.writeFileSync(path.join(undoDir, 'meta.json'), JSON.stringify({
+      id: '2025-01-01T00-00-00-000Z', from: '#ff0000', to: '#123456',
+      replaced: 1, files: ['index.html'], at: '2025-01-01T00:00:00.000Z',
+    }));
+    const entries = listUndo(dir);
+    eq(entries.length, 1);
     const { restored } = undoColor(dir);
     eq(restored, 1);
-    eq(fs.readFileSync(file, 'utf8'), before);
+    eq(fs.readFileSync(file, 'utf8'), '<i style="color:#ff0000">x</i>');
   });
 
   await check('reports zero when the color is absent', () => {
@@ -168,9 +188,7 @@ async function paletteTests() {
     fs.writeFileSync(path.join(dir, 'index.html'), '<b>no colors here</b>');
     const result = applyColor(dir, '1,2,3', '#ffffff');
     eq(result.replaced, 0);
-    eq(result.undoId, null);
-    ok(!fs.existsSync(path.join(dir, '.siteslurp')) || !fs.readdirSync(path.join(dir, '.siteslurp', 'undo')).length,
-      'no empty snapshot left behind');
+    eq(result.files, 0);
   });
 
   await check('rejects an invalid replacement color', () =>
@@ -1151,6 +1169,284 @@ async function reviewApiTests() {
   }
 }
 
+/* ---------------- versions (snapshots) ---------------- */
+async function versionTests() {
+  console.log('\nversions (snapshots)');
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  const dir = scratch('ver-site');
+  fs.writeFileSync(path.join(dir, 'index.html'), '<h1>v1</h1>');
+  fs.mkdirSync(path.join(dir, 'css'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'css', 'a.css'), 'body{color:red}');
+  const project = projectsReg.addLocal(dir);
+  const store = path.join(TMP, 'userData', 'versions', project.id);
+
+  await check('creates a snapshot with content-addressed blobs and a windows-safe stamp', async () => {
+    const result = await versions.createSnapshot(project, { label: 'first', source: 'manual' });
+    ok(!result.unchanged, 'created');
+    ok(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z(-\d+)?$/.test(result.id), 'stamp shape: ' + result.id);
+    ok(!result.id.includes(':'), 'no colon in the folder name');
+    eq(result.stats.files, 2);
+    // Local projects store under userData — never inside the user's own folder.
+    ok(!fs.existsSync(path.join(dir, '.siteslurp')), 'nothing written into the project folder');
+    ok(fs.existsSync(path.join(store, 'versions', result.id, 'meta.json')), 'manifest written');
+    ok(fs.readdirSync(path.join(store, 'blobs')).length >= 1, 'blobs written');
+  });
+
+  await check('identical content is skipped; changed content is not', async () => {
+    const again = await versions.createSnapshot(project, { source: 'manual' });
+    eq(again.unchanged, true);
+    eq(versions.listSnapshots(project).length, 1, 'nothing new was written: ');
+    fs.writeFileSync(path.join(dir, 'index.html'), '<h1>v2</h1>');
+    const changed = await versions.createSnapshot(project, { label: 'second', source: 'manual' });
+    ok(!changed.unchanged, 'a real change snapshots');
+    eq(versions.listSnapshots(project).length, 2);
+  });
+
+  await check('diffs two snapshots, and a snapshot against the working tree', async () => {
+    const [second, first] = versions.listSnapshots(project).map(s => s.id);
+    const between = await versions.diffSnapshots(project, first, second);
+    eq(between.changed.map(f => f.path), ['index.html']);
+    eq(between.added, []);
+    eq(between.removed, []);
+    fs.writeFileSync(path.join(dir, 'new.txt'), 'brand new');
+    fs.rmSync(path.join(dir, 'css', 'a.css'));
+    const work = await versions.diffSnapshots(project, second, 'working');
+    eq(work.added.map(f => f.path), ['new.txt']);
+    eq(work.removed.map(f => f.path), ['css/a.css']);
+  });
+
+  await check('readFileAt serves old content from the blob store and refuses escapes', async () => {
+    const first = versions.listSnapshots(project).at(-1).id;
+    eq((await versions.readFileAt(project, first, 'index.html')).toString(), '<h1>v1</h1>');
+    eq((await versions.readFileAt(project, 'working', 'index.html')).toString(), '<h1>v2</h1>');
+    await throws(() => versions.readFileAt(project, first, '../outside.txt'), 'traversal refused');
+    await throws(() => versions.readFileAt(project, first, '.siteslurp/meta.json'), 'dot paths refused');
+  });
+
+  await check('restore is non-destructive: pre-restore snapshot first, tree matches after', async () => {
+    const first = versions.listSnapshots(project).at(-1).id;
+    const before = versions.listSnapshots(project).length;
+    await versions.restoreSnapshot(project, first);
+    const list = versions.listSnapshots(project);
+    eq(list[0].source, 'pre-restore', 'newest snapshot is the safety copy: ');
+    eq(list.length, before + 1, 'a snapshot was added, nothing replaced: ');
+    eq(fs.readFileSync(path.join(dir, 'index.html'), 'utf8'), '<h1>v1</h1>');
+    ok(fs.existsSync(path.join(dir, 'css', 'a.css')), 'deleted file came back');
+    ok(!fs.existsSync(path.join(dir, 'new.txt')), 'file the snapshot lacks is gone');
+    // …and the pre-restore snapshot holds the file that just went away.
+    eq((await versions.readFileAt(project, list[0].id, 'new.txt')).toString(), 'brand new');
+  });
+
+  await check('capture projects store snapshots inside .siteslurp', async () => {
+    const capDir = scratch('ver-cap');
+    fs.writeFileSync(path.join(capDir, 'index.html'), '<h1>cap</h1>');
+    projectsReg.syncCaptures([{ dir: capDir, name: 'ver-cap' }]);
+    const capProject = projectsReg.byPath(capDir);
+    eq(capProject.autoSnapshot, true, 'captures default to auto-snapshot: ');
+    const made = await versions.createSnapshot(capProject, { source: 'capture', label: 'as captured' });
+    ok(fs.existsSync(path.join(capDir, '.siteslurp', 'versions', made.id, 'meta.json')),
+      'store lives inside the capture');
+    // The store must never end up in its own snapshots.
+    const meta = versions.getSnapshot(capProject, made.id);
+    ok(meta.files.every(f => !f.path.startsWith('.siteslurp')), 'store not self-snapshotted');
+  });
+
+  await check('prune keeps deliberate snapshots and the newest autos, then collects blobs', async () => {
+    // Fabricate 25 stale autos (well past the 14-day window): the oldest five
+    // reference a blob nothing else uses, the rest share another.
+    const staleSha = 'f'.repeat(40);
+    const keptSha = 'e'.repeat(40);
+    for (const sha of [staleSha, keptSha]) {
+      const blob = path.join(store, 'blobs', sha.slice(0, 2), sha);
+      fs.mkdirSync(path.dirname(blob), { recursive: true });
+      fs.writeFileSync(blob, 'x');
+    }
+    for (let i = 0; i < 25; i++) {
+      const id = `2020-01-${String(i + 1).padStart(2, '0')}T00-00-00Z`;
+      const metaDir = path.join(store, 'versions', id);
+      fs.mkdirSync(metaDir, { recursive: true });
+      fs.writeFileSync(path.join(metaDir, 'meta.json'), JSON.stringify({
+        id, label: '', source: 'auto', timestamp: `2020-01-${String(i + 1).padStart(2, '0')}T00:00:00.000Z`,
+        files: [{ path: 'x.txt', sha1: i < 5 ? staleSha : keptSha, size: 1, mtime: 0 }],
+        stats: { files: 1, bytes: 1, newBlobs: 0 },
+      }));
+    }
+    const deliberate = versions.listSnapshots(project).filter(s => s.source !== 'auto').length;
+    const result = await versions.pruneSnapshots(project);
+    eq(result.pruned, 5, 'oldest autos beyond the keep-20 window pruned: ');
+    ok(result.blobs >= 1, 'orphaned blob collected');
+    ok(!fs.existsSync(path.join(store, 'blobs', 'ff', staleSha)), 'stale blob gone');
+    ok(fs.existsSync(path.join(store, 'blobs', 'ee', keptSha)), 'referenced blob kept');
+    eq(versions.listSnapshots(project).filter(s => s.source !== 'auto').length, deliberate,
+      'deliberate snapshots untouched: ');
+  });
+
+  await check('the watcher ignores build output when told to', async () => {
+    const buildSite = scratch('watch-build');
+    fs.mkdirSync(path.join(buildSite, 'dist'), { recursive: true });
+    const bursts = [];
+    const handle = watchFolder(buildSite, burst => bursts.push(burst), { ignoreDirs: new Set(['dist']) });
+    if (!handle.active()) { console.log('       (skipped — recursive fs.watch unavailable)'); return; }
+    fs.writeFileSync(path.join(buildSite, 'dist', 'bundle.js'), 'compiled');
+    await sleep(500);
+    eq(bursts.length, 0, 'build output stayed silent: ');
+    fs.writeFileSync(path.join(buildSite, 'src.js'), 'edited');
+    await sleep(500);
+    ok(bursts.length >= 1, 'a source edit still reports');
+    handle.close();
+  });
+
+  await check('auto-snapshot fires after idle and is suppressed during app operations', async () => {
+    const autoSite = scratch('auto-site');
+    fs.writeFileSync(path.join(autoSite, 'index.html'), '<h1>auto</h1>');
+    const autoProject = projectsReg.addLocal(autoSite);
+    versions.autoWatch(autoProject, { idleMs: 250 });
+    try {
+      fs.writeFileSync(path.join(autoSite, 'index.html'), '<h1>edited</h1>');
+      let list = [];
+      for (let i = 0; i < 40 && !list.length; i++) {
+        await sleep(100);
+        list = versions.listSnapshots(autoProject);
+      }
+      eq(list.length, 1, 'one auto snapshot: ');
+      eq(list[0].source, 'auto');
+
+      await versions.suppressAuto(async () => {
+        fs.writeFileSync(path.join(autoSite, 'index.html'), '<h1>churn</h1>');
+        await sleep(900); // debounce + idle both pass while suppressed
+      });
+      await sleep(400);
+      eq(versions.listSnapshots(autoProject).length, 1, 'suppressed churn took no snapshot: ');
+    } finally {
+      versions.autoUnwatch(autoSite);
+      projectsReg.remove(autoProject.id);
+    }
+  });
+}
+
+/* ---------------- pinned serving (?v=<id>) ---------------- */
+async function pinnedServingTests() {
+  console.log('\npinned serving');
+
+  const dir = scratch('pin-site');
+  fs.writeFileSync(path.join(dir, 'index.html'), '<html><body><h1>old</h1></body></html>');
+  fs.writeFileSync(path.join(dir, 'clip.bin'), Buffer.from('0123456789'));
+  const project = projectsReg.addLocal(dir);
+  const snap = await versions.createSnapshot(project, { label: 'checkpoint', source: 'manual' });
+  fs.writeFileSync(path.join(dir, 'index.html'), '<html><body><h1>new</h1></body></html>');
+
+  const manager = new ReviewManager({
+    projects: projectsReg,
+    capturesRoot: () => scratch('pin-caps'),
+    exportReview,
+    overlayPath: path.join(ROOT, 'renderer', 'review-overlay.js'),
+  });
+  const hostMgr = new HostManager();
+  hostMgr.reviewRouter = d => manager.forDir(d);
+  // The same wiring main.js installs: snapshots resolved through the engine.
+  hostMgr.versionsRouter = d => {
+    const p = projectsReg.byPath(d);
+    if (!p) return null;
+    return {
+      meta: id => versions.getSnapshot(p, id, { optional: true }),
+      fileAt: (id, rel) => versions.fileAt(p, id, rel),
+    };
+  };
+  const port = await hostMgr.start(dir, 4720, { liveReload: true });
+  manager.enable(dir, project.id);
+
+  const get = (urlPath, headers = {}, method = 'GET') => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: urlPath, headers, method }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString() }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  const pinCookie = `__ss_version=${snap.id}`;
+
+  try {
+    await check('?v=<id> sets the pin cookie and redirects to the clean URL', async () => {
+      const res = await get(`/?v=${snap.id}`);
+      eq(res.status, 302);
+      eq(res.headers.location, '/');
+      ok(String(res.headers['set-cookie']).includes(`__ss_version=${snap.id}`), 'cookie set');
+    });
+
+    await check('a pinned request serves the snapshot with a banner and no live reload', async () => {
+      const res = await get('/', { Cookie: pinCookie });
+      eq(res.status, 200);
+      ok(res.body.includes('<h1>old</h1>'), 'old content served: ' + res.body.slice(0, 200));
+      ok(res.body.includes('Viewing snapshot'), 'pin banner injected');
+      ok(res.body.includes('checkpoint'), 'banner names the label');
+      ok(!res.body.includes('livereload.js'), 'live reload NOT injected while pinned');
+      ok(res.body.includes('review/client.js'), 'review overlay still injected');
+    });
+
+    await check('live serving is untouched next to the pin', async () => {
+      const res = await get('/');
+      ok(res.body.includes('<h1>new</h1>'), 'live content: ' + res.body.slice(0, 200));
+      ok(res.body.includes('livereload.js'), 'live reload present on live');
+      ok(!res.body.includes('Viewing snapshot'), 'no banner on live');
+    });
+
+    await check('range requests work against pinned blobs', async () => {
+      const res = await get('/clip.bin', { Cookie: pinCookie, Range: 'bytes=2-5' });
+      eq(res.status, 206);
+      eq(res.body, '2345');
+    });
+
+    await check('?v=live clears the pin; an unknown pin falls back to live', async () => {
+      const res = await get('/?v=live', { Cookie: pinCookie });
+      eq(res.status, 302);
+      ok(String(res.headers['set-cookie']).includes('Max-Age=0'), 'cookie cleared');
+      const ghost = await get('/', { Cookie: '__ss_version=2020-01-01T00-00-00Z' });
+      ok(ghost.body.includes('<h1>new</h1>'), 'pruned pin serves live');
+    });
+
+    await check('dot paths stay hidden even while pinned', async () => {
+      eq((await get('/.siteslurp/meta.json', { Cookie: pinCookie })).status, 404);
+    });
+
+    await check('a site\'s own ?v= cache-buster is not a pin command', async () => {
+      // Captured pages reference assets like style.css?v=123 — that must serve
+      // normally, never redirect, and never touch the pin cookie.
+      const res = await get('/clip.bin?v=123', { Cookie: pinCookie });
+      eq(res.status, 200);
+      eq(res.headers['set-cookie'], undefined, 'cookie untouched: ');
+      eq(res.body, '0123456789');
+    });
+
+    await check('the review API reports pinned:true and refuses annotations from a pinned view', async () => {
+      const stateRes = await get('/__siteslurp__/review/state', { Cookie: pinCookie });
+      eq(JSON.parse(stateRes.body).pinned, true);
+      const live = await get('/__siteslurp__/review/state');
+      eq(JSON.parse(live.body).pinned, false);
+      const refused = await new Promise((resolve, reject) => {
+        const payload = JSON.stringify({ scope: 'global', context: {}, input: { why: 'A note against an old page.' } });
+        const req = http.request({
+          host: '127.0.0.1', port, path: '/__siteslurp__/review/annotate', method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload), Cookie: pinCookie },
+        }, res => {
+          const chunks = [];
+          res.on('data', c => chunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
+        });
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+      });
+      eq(refused.status, 409);
+      ok(/live version/.test(JSON.parse(refused.body).error), 'friendly message');
+    });
+  } finally {
+    manager.disable(dir);
+    hostMgr.stopAll();
+  }
+}
+
 /* ---------------- misc ---------------- */
 async function miscTests() {
   console.log('\nurl + settings');
@@ -1186,11 +1482,12 @@ async function miscTests() {
   });
 
   await check('clamps out-of-range settings', () => {
-    const saved = settings.save({ defaultPort: 99, depth: 99, waitDelay: -5, sort: 'bogus' });
+    const saved = settings.save({ defaultPort: 99, depth: 99, waitDelay: -5, sort: 'bogus', autoSnapshotIdleSec: 3 });
     eq(saved.defaultPort, 1024);
     eq(saved.depth, 6);
     eq(saved.waitDelay, 0);
     eq(saved.sort, 'recent');
+    eq(saved.autoSnapshotIdleSec, 10);
   });
 
   await check('survives a corrupt settings file', () => {
@@ -1526,6 +1823,8 @@ async function sharingTests() {
   await reviewExportTests();
   await resolveLoopTests();
   await reviewApiTests();
+  await versionTests();
+  await pinnedServingTests();
   await miscTests();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

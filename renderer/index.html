@@ -41,6 +41,7 @@
   <symbol id="i-edit" viewBox="0 0 24 24"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></symbol>
   <symbol id="i-export" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
   <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M9 22V12h6v10"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 10 5-10 5L2 7l10-5Z"/><path d="m2 12 10 5 10-5M2 17l10 5 10-5"/></symbol>
 </svg>
 
 <!-- The window's own title bar. There is no OS frame and no menu strip behind
@@ -287,6 +288,11 @@
       <input id="setPort" type="number" min="1024" max="65535">
     </label>
     <label class="opt inline"><input type="checkbox" id="setOpenAfterHost"> Open the browser when I start hosting</label>
+    <label>Auto-snapshot after this many quiet seconds
+      <input id="setSnapIdle" type="number" min="10" max="600">
+      <span class="mini">While a site is hosted with Auto-snapshot on, a version is saved once your edits
+        go quiet for this long. Identical content is never saved twice.</span>
+    </label>
     <details class="advanced-block">
       <summary>Advanced</summary>
       <label>Page-capture engine <span id="setSfStatus" class="mini"></span>
@@ -315,12 +321,49 @@
   </div>
 </div>
 
+<!-- Project History: the reviews this site has been through and the versions
+     it has been. Two tabs, one modal — the site's whole memory in one place. -->
 <div id="historyModal" class="modal hidden">
-  <div class="modal-card">
-    <h3 id="historyTitle">Review history</h3>
+  <div class="modal-card history-card">
+    <h3 id="historyTitle">Project history</h3>
+    <div class="modal-tabs" role="tablist" aria-label="History sections">
+      <button id="histTabReviews" class="modal-tab on" role="tab" aria-selected="true">Reviews</button>
+      <button id="histTabVersions" class="modal-tab" role="tab" aria-selected="false">Versions</button>
+    </div>
     <div id="historyList" class="history-list"></div>
+    <div id="versionsPane" class="hidden">
+      <p class="modal-hint mini" id="versionsHint"></p>
+      <div id="versionsList" class="history-list versions-list"></div>
+      <div id="diffPane" class="hidden">
+        <div class="diff-head">
+          <button id="diffBack" class="small">&larr; Back</button>
+          <span id="diffTitle" class="mini"></span>
+          <label class="diff-against mini">against
+            <select id="diffAgainst" aria-label="Compare against"></select>
+          </label>
+        </div>
+        <div id="diffFiles" class="diff-files"></div>
+        <div id="diffView" class="diff-view hidden"></div>
+      </div>
+    </div>
     <div class="modal-actions">
       <button id="historyClose" class="primary small">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Snapshot prompt: one optional label, nothing else to decide. -->
+<div id="snapModal" class="modal hidden">
+  <div class="modal-card">
+    <h3>Snapshot <span id="snapName" class="mini"></span></h3>
+    <p class="modal-hint">Saves a restorable copy of the site's files as they are right now.
+      Identical content is stored once, so snapshots stay small.</p>
+    <label>Label <span class="mini">(optional)</span>
+      <input id="snapLabel" type="text" spellcheck="false" placeholder="e.g. before the hero rework">
+    </label>
+    <div class="modal-actions">
+      <button id="snapCancel" class="small">Cancel</button>
+      <button id="snapSave" class="primary small">Snapshot now</button>
     </div>
   </div>
 </div>

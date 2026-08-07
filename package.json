@@ -12,7 +12,7 @@
   "scripts": {
     "start": "electron .",
     "lint": "eslint .",
-    "test": "eslint . && node scripts/test.js",
+    "test": "eslint . && node --test test/*.test.js && node scripts/test.js",
     "smoke": "node scripts/smoke.js",
     "dist": "electron-builder --win",
     "dist:portable": "electron-builder --win portable",

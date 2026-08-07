@@ -14,7 +14,9 @@ const { HostManager } = require('./lib/server');
 const { TunnelManager } = require('./lib/tunnel');
 const runtimes = require('./lib/runtimes');
 const { runOnce } = require('./lib/runner');
-const { scanPalette, applyColor, undoColor, listUndo } = require('./lib/palette');
+const { scanPalette, applyColor, undoColor, listUndo, parseColor, toHex } = require('./lib/palette');
+const versions = require('./lib/versions');
+const { diffSegments } = require('./lib/diff');
 const { fixVideos } = require('./lib/videofix');
 const { zipFolder } = require('./lib/zip');
 const { listLibrary, describeLocal, invalidate } = require('./lib/library');
@@ -111,6 +113,30 @@ hosts.reviewRouter = dir => reviewManager.forDir(dir);
 hosts.entryFor = dir => {
   const project = projects.byPath(dir);
   return project ? project.entryFile : null;
+};
+// Pinned serving (?v=<id>): the server resolves files through the snapshot
+// engine while a pin cookie is present. Static/extracted projects only — a
+// dev server's rendered output isn't a function of its files, so pinning a
+// command runtime would be a lie.
+hosts.versionsRouter = dir => {
+  const project = projects.byPath(dir);
+  if (!project) return null;
+  const runtime = projects.runtimeFor(project);
+  if (runtime.kind === 'command') return null;
+  // Built-output projects serve from a subfolder; snapshot paths are rooted at
+  // the project folder, so requests get the prefix back.
+  const prefix = runtime.root ? String(runtime.root).replace(/\\/g, '/').replace(/\/+$/, '') + '/' : '';
+  return {
+    meta: id => versions.getSnapshot(project, id, { optional: true }),
+    fileAt: (id, rel) => versions.fileAt(project, id, prefix + rel),
+  };
+};
+// Auto-snapshot follows hosting: edits only matter while the site is being
+// looked at, and that is exactly when the folder is hosted.
+hosts.onHostChange = (dir, hosted) => {
+  if (!hosted) { versions.autoUnwatch(dir); return; }
+  const project = projects.byPath(dir);
+  if (project && project.autoSnapshot) versions.autoWatch(project);
 };
 
 /** Fill in what the overlay can't know: source file/line from the served
@@ -308,16 +334,17 @@ async function runCapture(opts) {
 
     send('run:status', { phase: 'extract', msg: 'Extracting into editable files' });
     const outDir = uniqueOutDir(rawDir + '_extracted');
-    const stats = await extractSite(rawDir, outDir, {
+    // suppressAuto: extraction churn must not read as the user editing.
+    const stats = await versions.suppressAuto(() => extractSite(rawDir, outDir, {
       onProgress: p => send('run:progress', p),
-    }, runLog);
+    }, runLog));
     runLog(`  ${stats.pages} pages | ${stats.css} css | ${stats.images} images | ${stats.fonts} fonts`);
     const rawManifest = readManifest(rawDir) || {};
     writeManifest(outDir, { ...rawManifest, url, name: opts.name || nameFromUrl(url), kind: 'extracted', source: rawDir });
 
     if (opts.fixVideos !== false) {
       send('run:status', { phase: 'videos', msg: 'Restoring stripped videos' });
-      const fixed = await fixVideos(outDir, runLog);
+      const fixed = await versions.suppressAuto(() => fixVideos(outDir, runLog));
       if (fixed) runLog(`  restored ${fixed} video(s)`);
     }
 
@@ -349,16 +376,18 @@ async function runExtract(rawDir, { overwrite = false } = {}) {
     const base = rawDir.replace(/[\\/]+$/, '') + '_extracted';
     const outDir = overwrite ? base : uniqueOutDir(base);
     send('run:status', { phase: 'extract', msg: 'Extracting into editable files' });
-    const stats = await extractSite(rawDir, outDir, {
+    // suppressAuto: an overwrite extract rewrites a folder that may be hosted
+    // with the idle watcher listening — that churn is ours, not an edit.
+    const stats = await versions.suppressAuto(() => extractSite(rawDir, outDir, {
       overwrite,
       signal: controller.signal,
       onProgress: p => send('run:progress', p),
-    }, runLog);
+    }, runLog));
     const manifest = readManifest(rawDir) || {};
     writeManifest(outDir, { ...manifest, kind: 'extracted', source: rawDir });
 
     send('run:status', { phase: 'videos', msg: 'Restoring stripped videos' });
-    await fixVideos(outDir, runLog).catch(err => log.warn('videofix', err));
+    await versions.suppressAuto(() => fixVideos(outDir, runLog)).catch(err => log.warn('videofix', err));
     send('run:status', { phase: 'thumb', msg: 'Rendering preview' });
     await makeThumb(outDir);
 
@@ -468,6 +497,7 @@ function registerIpc() {
           projectPort: project.port,
           autoStart: project.autoStart,
           liveReload: project.liveReload,
+          autoSnapshot: project.autoSnapshot,
           reviewActive: reviewManager.isActive(site.dir),
         }
         : site;
@@ -481,6 +511,7 @@ function registerIpc() {
         projectPort: project.port,
         autoStart: project.autoStart,
         liveReload: project.liveReload,
+        autoSnapshot: project.autoSnapshot,
         reviewActive: reviewManager.isActive(project.path),
         port: hosts.portFor(project.path),
         runtimeState: hosts.runtimeState(project.path),
@@ -512,6 +543,10 @@ function registerIpc() {
     hosts.stop(project.path);
     projects.remove(id);
     fs.promises.rm(projects.thumbPath(id), { force: true }).catch(() => {});
+    // Snapshots of a local project live in userData (never in the user's
+    // folder) — app bookkeeping, removed with the entry like the thumbnail.
+    fs.promises.rm(path.join(app.getPath('userData'), 'versions', id), { recursive: true, force: true })
+      .catch(() => {});
     log.info('local project removed', project.path);
     return true;
   });
@@ -597,6 +632,80 @@ function registerIpc() {
     // Applies immediately if the site is currently hosted.
     hosts.setLive(project.path, project.liveReload);
     return project.liveReload;
+  });
+
+  handle('project:setAutoSnapshot', ({ id, autoSnapshot }) => {
+    const project = projects.update(id, { autoSnapshot: !!autoSnapshot });
+    if (!project) throw new Error('Unknown project.');
+    // Applies immediately if the site is currently hosted.
+    if (hosts.portFor(project.path)) {
+      if (project.autoSnapshot) versions.autoWatch(project);
+      else versions.autoUnwatch(project.path);
+    }
+    return project.autoSnapshot;
+  });
+
+  // ---------- versioning (snapshots) ----------
+  // Every handler resolves the project from the registry; captures are
+  // additionally held to the captures-root gate, the same one their other
+  // mutating operations pass through.
+  function versionedProject(id) {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    if (project.kind === 'capture') assertInRoot(project.path, 'The site folder');
+    return project;
+  }
+
+  handle('version:create', async ({ id, label }) => {
+    const project = versionedProject(id);
+    const result = await versions.createSnapshot(project, { label: String(label || ''), source: 'manual' });
+    if (!result.unchanged) log.info('snapshot created', project.path, result.id);
+    return result;
+  });
+
+  handle('version:list', ({ id }) => {
+    const project = versionedProject(id);
+    // Summaries only — the file manifests can be thousands of entries.
+    return {
+      snapshots: versions.listSnapshots(project).map(({ id: vid, label, source, timestamp, stats }) =>
+        ({ id: vid, label, source, timestamp, stats })),
+    };
+  });
+
+  const DIFF_TEXT_EXT = new Set(['.html', '.htm', '.css', '.js', '.mjs', '.json', '.svg', '.txt', '.xml', '.md', '.map']);
+  const DIFF_MAX_BYTES = 2 * 1024 * 1024;
+
+  handle('version:diff', async ({ id, a, b, path: relPath }) => {
+    const project = versionedProject(id);
+    if (!relPath) return versions.diffSnapshots(project, String(a), String(b));
+    // One file's line diff, computed here so the renderer needs no diff engine.
+    const read = side => versions.readFileAt(project, String(side), relPath).catch(() => Buffer.alloc(0));
+    const [bufA, bufB] = await Promise.all([read(a), read(b)]);
+    if (bufA.length > DIFF_MAX_BYTES || bufB.length > DIFF_MAX_BYTES) return { kind: 'large' };
+    if (!DIFF_TEXT_EXT.has(path.extname(String(relPath)).toLowerCase())
+        || bufA.includes(0) || bufB.includes(0)) return { kind: 'binary' };
+    return { kind: 'text', ...diffSegments(bufA.toString('utf8'), bufB.toString('utf8')) };
+  });
+
+  handle('version:readFile', async ({ id, versionId, path: relPath }) => {
+    const project = versionedProject(id);
+    const buf = await versions.readFileAt(project, String(versionId), relPath);
+    if (buf.length > 20 * 1024 * 1024) throw new Error('That file is too large to preview here.');
+    return { base64: buf.toString('base64'), size: buf.length };
+  });
+
+  handle('version:restore', async ({ id, versionId }) => {
+    const project = versionedProject(id);
+    const result = await versions.restoreSnapshot(project, String(versionId));
+    log.info('snapshot restored', project.path, result.id, `${result.restored} file(s)`);
+    invalidate(project.path);
+    // The tree just changed under the thumbnail — re-render it to match.
+    const out = project.kind === 'local' ? projects.thumbPath(project.id) : undefined;
+    makeThumb(project.path, out, { entry: project.entryFile })
+      .then(made => { if (made) send('ui:refresh'); })
+      .catch(() => {});
+    send('ui:refresh');
+    return result;
   });
 
   // ---------- entry page ----------
@@ -821,28 +930,62 @@ function registerIpc() {
     return { zip, ...result };
   });
 
+  // Any color literal (or an "r,g,b" scan key) as a hex string, for labels.
+  const paletteHex = value => {
+    const text = String(value).trim();
+    if (/^\d+\s*,\s*\d+\s*,\s*\d+$/.test(text)) {
+      const [r, g, b] = text.split(',').map(n => parseInt(n, 10));
+      return toHex({ r, g, b });
+    }
+    const parsed = parseColor(text);
+    return parsed ? toHex(parsed) : text;
+  };
+
   handle('palette:scan', ({ dir }) => {
     assertInRoot(dir, 'The site folder');
-    return { colors: scanPalette(dir), undo: listUndo(dir) };
+    const project = projects.byPath(dir);
+    // Recolor history now lives in the versioning engine; sites recolored
+    // before the engine existed keep their old undo entries, read-only.
+    const history = [];
+    if (project) {
+      for (const snap of versions.listSnapshots(project)) {
+        if (snap.source !== 'palette') continue;
+        history.push({ id: snap.id, label: snap.label, at: snap.timestamp, engine: true });
+      }
+    }
+    for (const legacy of listUndo(dir)) history.push({ ...legacy, legacy: true });
+    history.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    return { colors: scanPalette(dir), undo: history };
   });
 
   handle('palette:apply', async ({ dir, from, to }) => {
     assertInRoot(dir, 'The site folder');
-    const result = applyColor(dir, from, to);
+    const project = projects.byPath(dir);
+    const result = await versions.suppressAuto(async () => {
+      // The recolor's undo is a snapshot now — taken before a byte changes.
+      if (project) {
+        await versions.createSnapshot(project, {
+          source: 'palette',
+          label: `Before recolor ${paletteHex(from)} → ${paletteHex(to)}`,
+        });
+      }
+      return applyColor(dir, from, to);
+    });
     invalidate(dir);
     return result;
   });
 
+  // The legacy path: restores a pre-engine .siteslurp/undo entry.
   handle('palette:undo', async ({ dir, id }) => {
     assertInRoot(dir, 'The site folder');
-    const result = undoColor(dir, id);
+    const result = await versions.suppressAuto(async () => undoColor(dir, id));
     invalidate(dir);
     return result;
   });
 
   handle('video:fix', async ({ dir }) => {
     assertInRoot(dir, 'The site folder');
-    const fixed = await fixVideos(dir, runLog);
+    const fixed = await versions.suppressAuto(() => fixVideos(dir, runLog));
     invalidate(dir);
     return fixed;
   });
@@ -1098,6 +1241,37 @@ function runSelfTest() {
       if (/MISSING/.test(health)) failure = 'environment incomplete: ' + health;
       if (!/oversizedIcons=0\b/.test(health)) failure = 'an icon rendered at its intrinsic size: ' + health;
 
+      // Snapshot lifecycle through the real bridge: create -> edit -> create ->
+      // diff -> restore -> prune surface. Opt-in (it registers and removes a
+      // temp project) so a routine smoke never touches the registry.
+      if (process.env.SLURP_SELFTEST_VERSIONS) {
+        const site = fs.mkdtempSync(path.join(app.getPath('temp'), 'slurp-versions-'));
+        try {
+          fs.writeFileSync(path.join(site, 'index.html'), '<h1>v1</h1>');
+          const inv = (channel, data) => win.webContents.executeJavaScript(
+            `window.snap.invoke(${JSON.stringify(channel)}, ${JSON.stringify(data)})`);
+          const project = await inv('project:addLocal', { path: site });
+          const first = await inv('version:create', { id: project.id, label: 'selftest' });
+          fs.writeFileSync(path.join(site, 'index.html'), '<h1>v2</h1>');
+          const second = await inv('version:create', { id: project.id });
+          const diff = await inv('version:diff', { id: project.id, a: first.id, b: second.id });
+          await inv('version:restore', { id: project.id, versionId: first.id });
+          const restoredOk = fs.readFileSync(path.join(site, 'index.html'), 'utf8').includes('v1');
+          const list = await inv('version:list', { id: project.id });
+          await inv('project:remove', { id: project.id });
+          const summary = `created=${!first.unchanged} changed=${diff.changed.length}`
+            + ` restored=${restoredOk} snapshots=${list.snapshots.length}`;
+          log.info('selftest versions:', summary);
+          if (summary !== 'created=true changed=1 restored=true snapshots=3') {
+            failure = 'versions lifecycle broke: ' + summary;
+          }
+        } catch (err) {
+          failure = 'versions lifecycle broke: ' + err.message;
+        } finally {
+          fs.rmSync(site, { recursive: true, force: true });
+        }
+      }
+
       if (url) {
         log.info('selftest capturing', url);
         // Submit the real form so the whole renderer -> ipc -> pipeline path runs.
@@ -1256,6 +1430,7 @@ if (!app.requestSingleInstanceLock()) {
     if (job) job.controller.abort();
     tunnels.stopAll();
     hosts.stopAll();
+    versions.autoUnwatchAll();
   });
   // Ctrl+C in the terminal during development never reaches before-quit, and a
   // dev server we started would keep running with nothing left to stop it.

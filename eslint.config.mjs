@@ -25,7 +25,7 @@ export default [
   { ignores: ['dist/**', 'node_modules/**', 'build/**'] },
   js.configs.recommended,
   {
-    files: ['main.js', 'preload.js', 'lib/**/*.js', 'scripts/**/*.js'],
+    files: ['main.js', 'preload.js', 'lib/**/*.js', 'scripts/**/*.js', 'test/**/*.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'commonjs',
