@@ -7,10 +7,14 @@ const INVOKE = new Set([
   'env:get',
   'settings:get', 'settings:set', 'settings:browseRoot', 'settings:browseBrowser',
   'library:list',
-  'project:addLocal', 'project:remove', 'project:setAutoStart', 'project:setLiveReload',
+  'project:addLocal', 'project:addAttach', 'project:browseFolder',
+  'project:remove', 'project:setAutoStart', 'project:setLiveReload',
   'project:setAutoSnapshot',
   'project:runtimes', 'project:setRuntime', 'project:install',
   'project:pages', 'project:setEntry',
+  'studio:open',
+  'sb:hello', 'sb:layout', 'sb:nav', 'sb:annotate', 'sb:pin', 'sb:shot', 'sb:revealShot',
+  'sb:consoleTail', 'sb:copyAgent', 'sb:copyText',
   'version:create', 'version:list', 'version:diff', 'version:readFile', 'version:restore',
   'runtime:state', 'runtime:restart',
   'review:start', 'review:stop', 'review:history', 'review:export',
@@ -36,6 +40,7 @@ const EVENTS = new Set([
   'ui:refresh', 'ui:settings', 'ui:focus-url',
   'ui:palette',
   'update:ready',
+  'sb:state', 'sb:console',
 ]);
 
 // Electron wraps handler errors as "Error invoking remote method 'x': Error: real

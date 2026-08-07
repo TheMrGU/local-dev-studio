@@ -462,10 +462,13 @@ async function hostSite(dir, site = null) {
   try {
     const { port, url } = await invoke('host:start', { dir });
     if (!state.settings || state.settings.openAfterHost) await invoke('open:url', { url });
-    const booting = site && site.runtime && site.runtime.kind === 'command';
-    toast(booting
-      ? `Starting ${site.runtime.label} on localhost:${port} — the page turns into the site when it's up`
-      : `Hosting on localhost:${port}`,
+    const attaching = site && site.runtime && site.runtime.id === 'attach';
+    const booting = !attaching && site && site.runtime && site.runtime.kind === 'command';
+    toast(attaching
+      ? `Connected — fronting your server on localhost:${port}`
+      : booting
+        ? `Starting ${site.runtime.label} on localhost:${port} — the page turns into the site when it's up`
+        : `Hosting on localhost:${port}`,
     { kind: 'ok', timeout: booting ? 9000 : undefined, action: { label: 'Open', fn: () => invoke('open:url', { url }) } });
     await refreshLibrary();
   } catch (err) {
@@ -511,6 +514,54 @@ $('#btnStopAll').addEventListener('click', async () => {
   await invoke('host:stopAll').catch(failed);
   await refreshLibrary();
 });
+
+/* ---------- attach to a dev server ----------
+   The developer's own `npm run dev` keeps its terminal; SiteSlurp fronts the
+   port it answers on. Loopback only — the main process refuses anything else. */
+function openAttach() {
+  $('#attachTarget').value = '';
+  $('#attachFolder').value = '';
+  $('#attachName').value = '';
+  $('#attachModal').classList.remove('hidden');
+  $('#attachTarget').focus();
+}
+$('#attachCancel').addEventListener('click', () => $('#attachModal').classList.add('hidden'));
+$('#attachBrowse').addEventListener('click', async () => {
+  const dir = await invoke('project:browseFolder').catch(() => null);
+  if (dir) $('#attachFolder').value = dir;
+});
+$('#attachTarget').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#attachSave').click(); }
+});
+$('#attachSave').addEventListener('click', async () => {
+  const button = $('#attachSave');
+  button.disabled = true;
+  try {
+    const project = await invoke('project:addAttach', {
+      target: $('#attachTarget').value,
+      folder: $('#attachFolder').value.trim() || null,
+      name: $('#attachName').value.trim(),
+    });
+    $('#attachModal').classList.add('hidden');
+    const { port, url } = await invoke('host:start', { dir: project.path });
+    toast(`Connected — fronting your server on localhost:${port}`, {
+      kind: 'ok', timeout: 9000,
+      action: { label: 'Open', fn: () => invoke('open:url', { url }) },
+    });
+    setTab('studio');
+    await refreshLibrary();
+  } catch (err) {
+    failed(err);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+/* ---------- studio browser ---------- */
+async function openStudioBrowser(site) {
+  await invoke('studio:open', { id: site.projectId });
+  await refreshLibrary();
+}
 
 /* ---------- drag & drop: add a local folder as a project ---------- */
 let dragDepth = 0;
@@ -683,13 +734,17 @@ function renderCard(site) {
   // "0 pages" is a lie about a Next.js app — it has no HTML until it runs. What
   // that card should say is what will be run.
   const command = site.runtime && site.runtime.kind === 'command' ? site.runtime : null;
+  const attach = command && command.id === 'attach' ? command : null;
   meta.textContent = site.missing
     ? 'folder not found on disk'
-    : command
-      ? `${command.label}${site.needsInstall ? ' · needs install' : ''} · ${fileSize(site.sizeBytes)}`
-      : `${site.pages} page${site.pages === 1 ? '' : 's'} · ${fileSize(site.sizeBytes)} · `
-        + new Date(site.mtime).toLocaleDateString();
-  if (command) meta.title = command.command || '';
+    : attach
+      ? `attached → :${attach.appPort}${site.attachOnly ? '' : ' · ' + fileSize(site.sizeBytes)}`
+      : command
+        ? `${command.label}${site.needsInstall ? ' · needs install' : ''} · ${fileSize(site.sizeBytes)}`
+        : `${site.pages} page${site.pages === 1 ? '' : 's'} · ${fileSize(site.sizeBytes)} · `
+          + new Date(site.mtime).toLocaleDateString();
+  if (attach) meta.title = `Fronting the dev server you run yourself on port ${attach.appPort}`;
+  else if (command) meta.title = command.command || '';
   body.appendChild(name);
   body.appendChild(meta);
 
@@ -737,12 +792,15 @@ function renderCard(site) {
   if (site.kind === 'local' && site.projectId) {
     more.push({ icon: 'gear', label: 'How to serve this…', fn: () => openRuntime(site) });
     if (site.port && site.runtime && site.runtime.kind === 'command') {
-      more.push({ icon: 'refresh', label: 'Restart server', fn: async () => {
+      more.push({ icon: 'refresh', label: attach ? 'Reconnect' : 'Restart server', fn: async () => {
         await invoke('runtime:restart', { dir: site.dir });
-        toast('Restarting…', { kind: 'ok', timeout: 3000 });
+        toast(attach ? 'Reconnecting…' : 'Restarting…', { kind: 'ok', timeout: 3000 });
         await refreshLibrary();
       } });
     }
+  }
+  if (site.projectId && !site.missing) {
+    more.push({ icon: 'monitor', label: 'Open in Studio Browser', fn: () => openStudioBrowser(site) });
   }
   if (shared) {
     more.push({ icon: 'share', label: 'Copy public link', fn: async () => {
@@ -754,15 +812,18 @@ function renderCard(site) {
     more.push({ icon: 'map', label: 'Open sitemap', fn: () =>
       invoke('open:url', { url: `http://localhost:${site.port}/_index.html` }) });
   }
-  more.push({ icon: 'folder', label: 'Open folder', fn: () => invoke('open:folder', { dir: site.dir }) });
-  more.push({ icon: 'code', label: 'Open in VS Code', fn: () => invoke('open:editor', { dir: site.dir }) });
+  // A folderless attach project has only a placeholder dir — nothing there to open.
+  if (!site.attachOnly) {
+    more.push({ icon: 'folder', label: 'Open folder', fn: () => invoke('open:folder', { dir: site.dir }) });
+    more.push({ icon: 'code', label: 'Open in VS Code', fn: () => invoke('open:editor', { dir: site.dir }) });
+  }
   if (site.kind === 'extracted') {
     more.push({ icon: 'film', label: 'Restore stripped videos', fn: async () => {
       const fixed = await invoke('video:fix', { dir: site.dir });
       toast(fixed ? `Restored ${fixed} video(s)` : 'No stripped videos found', { kind: fixed ? 'ok' : '' });
     } });
   }
-  if (!site.missing && (site.kind === 'extracted' || site.kind === 'local')) {
+  if (!site.missing && !site.attachOnly && (site.kind === 'extracted' || site.kind === 'local')) {
     more.push({ icon: 'camera', label: 'Refresh preview', fn: async () => {
       await invoke('thumb:make', { dir: site.dir });
       await refreshLibrary();
@@ -780,8 +841,9 @@ function renderCard(site) {
         await refreshLibrary();
       } });
     }
-    // A restorable copy of the files as they are right now.
-    if (!site.missing) {
+    // A restorable copy of the files as they are right now. A folderless
+    // attach project has no files to snapshot.
+    if (!site.missing && !site.attachOnly) {
       more.push({ icon: 'layers', label: 'Snapshot now…', fn: () => openSnapshotPrompt(site) });
     }
     more.push({ icon: 'history', label: 'Project history', fn: () => openHistory(site) });
@@ -794,7 +856,7 @@ function renderCard(site) {
       } });
     }
     // Snapshot on its own after edits go quiet, while the site is hosted.
-    if (!site.missing) {
+    if (!site.missing && !site.attachOnly) {
       more.push({ icon: 'layers', label: site.autoSnapshot ? 'Auto-snapshot: on' : 'Auto-snapshot: off', fn: async () => {
         await invoke('project:setAutoSnapshot', { id: site.projectId, autoSnapshot: !site.autoSnapshot });
         await refreshLibrary();
@@ -832,6 +894,8 @@ function renderCard(site) {
     actions.appendChild(textButton('globe', 'Host', () => hostSite(site.dir, site)));
   }
   if (site.projectId && !site.missing) {
+    actions.appendChild(iconBtn('monitor', 'Open in Studio Browser — annotate with a console, viewports and versions', () =>
+      openStudioBrowser(site)));
     actions.appendChild(iconBtn('note', 'Review this site (annotate + export a spec)', async () => {
       await invoke('review:start', { dir: site.dir });
       toast('Review mode on — annotate in the browser, then Export from the toolbar', { kind: 'ok', timeout: 7000 });
@@ -934,9 +998,21 @@ function renderLibrary() {
   const empty = $('#empty');
   empty.classList.toggle('hidden', sites.length > 0);
   if (!sites.length) {
-    empty.textContent = state.library.sites.length
+    empty.innerHTML = '';
+    const line = document.createElement('p');
+    line.textContent = state.library.sites.length
       ? 'Nothing matches that filter.'
       : 'Nothing here yet — capture a site in the Extractor tab, or drop a folder to add your own.';
+    empty.appendChild(line);
+    if (!state.library.sites.length) {
+      const attach = document.createElement('button');
+      attach.className = 'small';
+      attach.style.marginTop = '10px';
+      attach.textContent = 'Attach to a dev server…';
+      attach.title = 'Already running npm run dev? Front it with Review Mode without restarting anything.';
+      attach.addEventListener('click', openAttach);
+      empty.appendChild(attach);
+    }
   }
   $('#libCount').textContent = sites.length || '';
 
@@ -1543,8 +1619,13 @@ function rtSelected() {
 /** Show the fields the chosen runtime actually uses. */
 function rtRenderChoice(runtime, { command, appPort } = {}) {
   const isCommand = runtime && runtime.kind === 'command';
-  $('#rtCommandRow').classList.toggle('hidden', !isCommand);
+  // Attach runs nothing: no command to edit, and the port field is the point.
+  const isAttach = isCommand && runtime.id === 'attach';
+  $('#rtCommandRow').classList.toggle('hidden', !isCommand || isAttach);
   $('#rtPortRow').classList.toggle('hidden', !isCommand);
+  $('#rtPortHint').textContent = isAttach
+    ? 'The port your own dev server is listening on. Loopback only.'
+    : 'Only when the command binds a port of its own (docker, a hard-coded server).';
   if (isCommand) {
     $('#rtCommand').value = command !== undefined ? command : (runtime.command || '');
     $('#rtAppPort').value = appPort || runtime.appPort || '';
@@ -1661,10 +1742,15 @@ $('#rtSave').addEventListener('click', async () => {
   if (!chosen) return;
   const runtime = { ...chosen };
   if (runtime.kind === 'command') {
-    runtime.command = $('#rtCommand').value.trim();
     const appPort = parseInt($('#rtAppPort').value, 10);
     if (appPort > 0) runtime.appPort = appPort; else delete runtime.appPort;
-    if (!runtime.command) { failed(new Error('Enter the command that starts this site.')); return; }
+    if (runtime.id === 'attach') {
+      runtime.command = '';
+      if (!runtime.appPort) { failed(new Error('Enter the port your dev server is listening on.')); return; }
+    } else {
+      runtime.command = $('#rtCommand').value.trim();
+      if (!runtime.command) { failed(new Error('Enter the command that starts this site.')); return; }
+    }
   }
   try {
     await invoke('project:setRuntime', { id: rt.site.projectId, runtime });
@@ -1856,6 +1942,7 @@ function allCommands() {
     { group: 'library', icon: 'search', label: 'Filter the library', keys: '/',
       fn: () => { setTab('studio'); $('#libSearch').focus(); } },
     { group: 'library', icon: 'folder', label: 'Open captures folder', fn: winAction('capturesFolder') },
+    { group: 'studio', icon: 'plug', label: 'Attach to a dev server…', fn: openAttach },
   ];
 
   for (const site of state.library.sites) {
@@ -1864,12 +1951,16 @@ function allCommands() {
       list.push({ group: 'sites', icon: 'open', label: `Open ${site.name} — localhost:${site.port}`,
         fn: () => invoke('open:url', { url: `http://localhost:${site.port}/` }).catch(failed) });
       list.push({ group: 'sites', icon: 'stop', label: `Stop ${site.name}`, fn: () => stopSite(site.dir) });
-      if (site.projectId) {
+      if (site.projectId && !site.attachOnly) {
         list.push({ group: 'sites', icon: 'layers', label: `Snapshot ${site.name}`,
           fn: () => openSnapshotPrompt(site) });
       }
     } else if (site.kind !== 'raw') {
       list.push({ group: 'sites', icon: 'globe', label: `Host ${site.name}`, fn: () => hostSite(site.dir, site) });
+    }
+    if (site.projectId) {
+      list.push({ group: 'sites', icon: 'monitor', label: `Open ${site.name} in Studio Browser`,
+        fn: () => openStudioBrowser(site) });
     }
   }
   if (state.library.sites.some(s => s.port)) {
@@ -1975,7 +2066,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeMenu();
     for (const sel of ['#cmdModal', '#settingsModal', '#doctorModal', '#aboutModal', '#paletteDrawer',
-      '#historyModal', '#calibrationModal', '#logModal', '#entryModal', '#snapModal']) {
+      '#historyModal', '#calibrationModal', '#logModal', '#entryModal', '#snapModal', '#attachModal']) {
       $(sel).classList.add('hidden');
     }
     clearInterval(logTimer);
@@ -2001,7 +2092,7 @@ document.addEventListener('keydown', e => {
 
 // Click the backdrop to dismiss a modal.
 for (const id of ['cmdModal', 'settingsModal', 'doctorModal', 'aboutModal', 'historyModal', 'runtimeModal',
-  'calibrationModal', 'logModal', 'entryModal', 'snapModal']) {
+  'calibrationModal', 'logModal', 'entryModal', 'snapModal', 'attachModal']) {
   document.getElementById(id).addEventListener('click', e => {
     if (e.target.id === id) e.target.classList.add('hidden');
   });

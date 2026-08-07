@@ -29,10 +29,11 @@ const { scanPalette, applyColor, undoColor, listUndo, parseColor } = require('..
 const { extractSite, uniqueOutDir } = require('../lib/extract');
 const { zipFolder } = require('../lib/zip');
 const { makeHandler, HostManager } = require('../lib/server');
-const { makeProxyHandler } = require('../lib/proxy');
+const { makeProxyHandler, adjustCsp } = require('../lib/proxy');
 const { parsePublicUrl, viaTunnel } = require('../lib/tunnel');
 const runtimes = require('../lib/runtimes');
-const { portAnswers } = require('../lib/runner');
+const { portAnswers, AttachRunner } = require('../lib/runner');
+const { CHECKLISTS } = require('../lib/checklists');
 const { resolveEntry } = require('../lib/entry');
 const { normalizeUrl, nameFromUrl, reserveCaptureDir } = require('../lib/capture');
 const versions = require('../lib/versions');
@@ -43,7 +44,7 @@ const { describeLocal } = require('../lib/library');
 const { LiveReload } = require('../lib/livereload');
 const reviewsStore = require('../lib/reviews');
 const calibrationStore = require('../lib/calibration');
-const { exportReview, styleLine } = require('../lib/reviewExport');
+const { exportReview, styleLine, renderAnnotation } = require('../lib/reviewExport');
 const { ReviewManager } = require('../lib/review');
 const { locateSource } = require('../lib/sourceline');
 
@@ -891,6 +892,24 @@ async function reviewStoreTests() {
     const nothing = locateSource(dir, { context: { sourceFile: 'about', outerHTML: '<div class="grid"></div>' } });
     eq(nothing.sourceLine, null, 'no guess when there is no evidence: ');
   });
+
+  await check('command runtimes never pass a route off as a file (sourceline honesty)', () => {
+    // Same Next-shaped project: with `generated`, an element the source can't
+    // uniquely answer for gets an empty sourceFile — "/about" is a route, and
+    // writing it into REVIEW.md as a file would send the agent to a ghost.
+    const dir = scratch('srcline-next');
+    const blank = locateSource(dir, {
+      context: { sourceFile: 'about', outerHTML: '<div class="grid"></div>' },
+    }, { generated: true });
+    eq(blank.sourceFile, '', 'route never becomes a file: ');
+    eq(blank.sourceLine, null);
+
+    // But a unique match in the project's own source still counts.
+    const found = locateSource(dir, {
+      context: { sourceFile: 'about', outerHTML: '<section id="team-block" class="wrap">' },
+    }, { generated: true });
+    eq(found.sourceFile, 'src/app/about/page.tsx');
+  });
 }
 
 /* ---------------- review export ---------------- */
@@ -971,6 +990,63 @@ async function reviewExportTests() {
       letterSpacing: '0px', color: '#6b7280', backgroundColor: 'transparent',
       margin: '0px 0px 16px 0px', padding: '0px', display: 'block',
     }), 'Inter, sans-serif 400 · 42px/48px · letter-spacing 0px · color #6b7280 · background transparent · margin 0px 0px 16px 0px · padding 0px · display block');
+  });
+
+  // renderAnnotation is shared between REVIEW.md and "Copy for agent" — the
+  // block below is what lands on the clipboard, verbatim.
+  await check('the shared annotation formatter carries markup, console tail and reference image', () => {
+    const block = renderAnnotation({
+      scope: 'element',
+      context: {
+        selector: '.cta', selectorFallback: 'body > div:nth-child(2)',
+        sourceFile: '', viewport: { width: 375, height: 812, label: 'mobile' },
+        computedStyles: { color: '#fff' },
+        outerHTML: '<button class="cta">Buy now</button>',
+        consoleTail: ['[14:30:02] error Uncaught TypeError: x is undefined (app.js:14)'],
+        referenceImage: 'shots/ann_ab_ref.png',
+      },
+      input: { rating: null, severity: 'should-fix', axes: [], why: 'The button does nothing.', want: 'Wire it up.' },
+    }, () => null, { devServer: true });
+    ok(block.startsWith('## [SHOULD-FIX] .cta'), block.split('\n')[0]);
+    ok(block.includes('**File:** selector-only (dev server)'), 'honesty line for dev servers');
+    ok(block.includes('```html\n<button class="cta">Buy now</button>\n```'), 'markup fence');
+    ok(block.includes('**Console at the time** (last 1)'), 'console tail heading');
+    ok(block.includes('Uncaught TypeError'), 'console tail body');
+    ok(block.includes('**Reference image:** shots/ann_ab_ref.png'), 'reference image line');
+  });
+
+  await check('a static project with a real file never shows the dev-server line', () => {
+    const block = renderAnnotation({
+      scope: 'element',
+      context: { selector: 'h1', sourceFile: 'index.html', sourceLine: 12 },
+      input: { rating: null, severity: 'nitpick', axes: [], why: 'Tiny thing here worth a note.', want: '' },
+    });
+    ok(block.includes('**File:** index.html:12'), block);
+    ok(!block.includes('selector-only'), 'no honesty line when the file is real');
+  });
+
+  await check('sanitizeContext keeps the console tail and reference image, bounded', () => {
+    const noisy = reviewsStore.addAnnotation(PRJ, {
+      scope: 'element',
+      context: {
+        selector: '.x',
+        consoleTail: Array.from({ length: 40 }, (v, i) => `line ${i}`),
+        referenceImage: 'shots/ref.png',
+      },
+      input: { severity: 'should-fix', why: 'Console was on fire when I saw this.' },
+    });
+    eq(noisy.context.consoleTail.length, 20, 'tail capped at 20: ');
+    eq(noisy.context.referenceImage, 'shots/ref.png');
+    reviewsStore.deleteAnnotation(PRJ, noisy.id);
+  });
+
+  await check('the three built-in checklists are real lists with real prompts', () => {
+    eq(CHECKLISTS.length, 3);
+    eq(CHECKLISTS.map(c => c.id), ['a11y', 'responsive', 'prelaunch']);
+    for (const list of CHECKLISTS) {
+      ok(list.name && list.items.length >= 4, list.id + ' has prompts');
+      for (const item of list.items) ok(typeof item === 'string' && item.length > 10, 'prompt is a sentence');
+    }
   });
 
   await check('exporting marks the review closed; the next note starts a new one', () => {
@@ -1099,7 +1175,8 @@ async function reviewApiTests() {
       ok(page.text.includes('/__siteslurp__/review/client.js'), 'tag injected');
       const script = await request('GET', '/__siteslurp__/review/client.js');
       eq(script.status, 200);
-      ok(script.text.includes('__ssReview'), 'overlay script body');
+      ok(script.text.includes('__ssBridge'), 'overlay script body');
+      ok(!script.text.includes('__ssReview'), 'debug-era name is gone');
     });
 
     await check('state reports the project and an open review', async () => {
@@ -1108,6 +1185,7 @@ async function reviewApiTests() {
       eq(res.json.project.id, project.id);
       ok(/^rev_\d{8}_\d{2}$/.test(res.json.review.id), 'review id');
       ok(Array.isArray(res.json.axes) && res.json.axes.includes('typography'), 'axes list');
+      eq(res.json.checklists.map(c => c.id), ['a11y', 'responsive', 'prelaunch'], 'checklists ride along: ');
     });
 
     await check('the no-reason rule surfaces as a 400, not a save', async () => {
@@ -1137,10 +1215,43 @@ async function reviewApiTests() {
       eq(res.status, 403);
     });
 
+    await check('a reference image uploads, serves back, and rides the export', async () => {
+      const state = await request('GET', '/__siteslurp__/review/state');
+      const target = state.json.annotations[0];
+      // A real 1×1 PNG — the endpoint decodes and stores actual bytes.
+      const px = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      const res = await request('POST', '/__siteslurp__/review/image', {
+        id: target.id, dataUrl: 'data:image/png;base64,' + px,
+      });
+      eq(res.status, 200);
+      eq(res.json.annotation.context.referenceImage, `shots/${target.id}_ref.png`);
+      const stored = path.join(TMP, 'userData', 'reviews', project.id, 'shots', `${target.id}_ref.png`);
+      ok(fs.existsSync(stored), 'bytes on disk');
+      const img = await request('GET', `/__siteslurp__/review/image/${target.id}`);
+      eq(img.status, 200, 'served back to the overlay: ');
+
+      const junk = await request('POST', '/__siteslurp__/review/image', {
+        id: target.id, dataUrl: 'data:text/html;base64,PGI+bm90IGFuIGltYWdlPC9iPg==',
+      });
+      eq(junk.status, 400, 'non-images refused: ');
+      const nobody = await request('POST', '/__siteslurp__/review/image', {
+        id: 'ann_missing', dataUrl: 'data:image/png;base64,' + px,
+      });
+      eq(nobody.status, 404, 'unknown annotation refused: ');
+    });
+
     await check('export over http produces the folder and reveal is scoped', async () => {
       const res = await request('POST', '/__siteslurp__/review/export');
       eq(res.status, 200);
       ok(fs.existsSync(path.join(res.json.folder, 'REVIEW.md')), 'REVIEW.md exists');
+      // The reference image attached above is copied out with the shots.
+      const state = await request('GET', '/__siteslurp__/review/state');
+      const withImage = state.json.annotations.find(a => a.context.referenceImage);
+      ok(withImage, 'annotation still carries the image');
+      ok(fs.existsSync(path.join(res.json.folder, path.normalize(withImage.context.referenceImage))),
+        'reference image exported');
+      const md = fs.readFileSync(path.join(res.json.folder, 'REVIEW.md'), 'utf8');
+      ok(md.includes(`**Reference image:** ${withImage.context.referenceImage}`), 'REVIEW.md names it');
     });
 
     await check('resolve over http re-rates and can request an anchor', async () => {
@@ -1504,6 +1615,19 @@ async function miscTests() {
     if (editor === null) return; // machines without an editor are a valid answer
     ok(typeof editor === 'string' && fs.statSync(editor).isFile(), 'points at a file: ' + editor);
   });
+
+  await check('every preload channel has a main handler, and vice versa (invariant 1)', () => {
+    const preload = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8');
+    const main = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8');
+    const invokeBlock = /const INVOKE = new Set\(\[([\s\S]*?)\]\);/.exec(preload);
+    ok(invokeBlock, 'INVOKE set found');
+    const allowed = [...invokeBlock[1].matchAll(/'([^']+)'/g)].map(m => m[1]).sort();
+    const handled = [...new Set([...main.matchAll(/\bhandle\('([^']+)'/g)].map(m => m[1]))].sort();
+    const missingHandler = allowed.filter(c => !handled.includes(c));
+    const missingAllow = handled.filter(c => !allowed.includes(c));
+    eq(missingHandler, [], 'allowlisted but never handled: ');
+    eq(missingAllow, [], 'handled but not allowlisted: ');
+  });
 }
 
 /* ---------------- runtimes: sites that aren't just files ---------------- */
@@ -1705,6 +1829,204 @@ async function runtimeTests() {
   });
 }
 
+/* ---------------- attach mode: front a server we didn't start ---------------- */
+async function attachTests() {
+  console.log('\nattach mode');
+
+  await check('parses attach targets and refuses anything that is not loopback', () => {
+    const refuse = text => {
+      try { runtimes.parseAttachTarget(text); } catch { return; }
+      throw new Error(`expected a refusal for ${JSON.stringify(text)}`);
+    };
+    eq(runtimes.parseAttachTarget('3000'), 3000);
+    eq(runtimes.parseAttachTarget(':5173'), 5173);
+    eq(runtimes.parseAttachTarget('localhost:3000'), 3000);
+    eq(runtimes.parseAttachTarget('127.0.0.1:8080'), 8080);
+    eq(runtimes.parseAttachTarget('[::1]:4321'), 4321);
+    eq(runtimes.parseAttachTarget('http://localhost:5173/'), 5173);
+    eq(runtimes.parseAttachTarget('http://localhost/'), 80, 'default http port: ');
+    refuse('192.168.1.20:3000');
+    refuse('evil.example:80');
+    refuse('http://0.0.0.0:3000');
+    refuse('file:///etc/passwd');
+    refuse('');
+    refuse('not a port');
+  });
+
+  await check('attach is always offered as a choice but never detected as a guess', () => {
+    const dir = scratch('attach-empty');
+    ok(runtimes.candidates(dir).some(c => c.id === 'attach'), 'candidate offered');
+    eq(runtimes.detect(dir), null, 'not a detection: ');
+  });
+
+  await check('AttachRunner reaches ready, notices death, and reconnects by itself', async () => {
+    const backing = http.createServer((req, res) => { res.writeHead(200); res.end('hi'); });
+    await new Promise(resolve => backing.listen(0, '127.0.0.1', resolve));
+    const port = backing.address().port;
+
+    const runner = new AttachRunner({ port, pollMs: 120 });
+    runner.start();
+    const until = async (want, ms) => {
+      const deadline = Date.now() + ms;
+      while (runner.status !== want && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 60));
+      }
+      return runner.status;
+    };
+    try {
+      eq(await until('ready', 5000), 'ready');
+      ok(runner.state().attached, 'state says attached');
+      eq(runner.state().pid, null, 'no process of ours');
+
+      backing.close();
+      backing.closeAllConnections?.();
+      eq(await until('failed', 8000), 'failed');
+      ok(/still running/.test(runner.message), 'friendly message: ' + runner.message);
+
+      // The server comes back — so does the card, with no clicks.
+      const revived = http.createServer((req, res) => { res.writeHead(200); res.end('back'); });
+      await new Promise((resolve, reject) => {
+        revived.once('error', reject);
+        revived.listen(port, '127.0.0.1', resolve);
+      });
+      try {
+        eq(await until('ready', 8000), 'ready');
+      } finally {
+        revived.close();
+        revived.closeAllConnections?.();
+      }
+    } finally {
+      runner.stop();
+    }
+  });
+
+  await check('hosting an attach runtime proxies to the running server, and stop leaves it alive', async () => {
+    const backing = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<html><body>their server at ' + req.url + '</body></html>');
+    });
+    await new Promise(resolve => backing.listen(0, '127.0.0.1', resolve));
+    const appPort = backing.address().port;
+
+    const hostMgr = new HostManager();
+    const runtime = { kind: 'command', id: 'attach', label: 'attach', command: '', appPort };
+    const port = await hostMgr.start(scratch('attach-host'), 4680, { runtime, name: 'attached' });
+    const get = urlPath => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: urlPath, headers: { accept: 'text/html' } }, res => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
+      }).on('error', reject);
+    });
+    try {
+      let page = { body: '' };
+      for (let attempt = 0; attempt < 80 && !page.body.includes('their server'); attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        page = await get('/hello');
+      }
+      ok(page.body.includes('their server at /hello'), 'proxied through: ' + page.body.slice(0, 120));
+      const state = hostMgr.runtimeState(scratch('attach-host'));
+      eq(state.status, 'ready');
+      ok(state.attached, 'reports attach');
+
+      hostMgr.stop(scratch('attach-host'));
+      // The whole point: their process is not ours to kill.
+      ok(await portAnswers(appPort, 800), 'the backing server survived our stop');
+    } finally {
+      hostMgr.stopAll();
+      backing.close();
+      backing.closeAllConnections?.();
+    }
+  });
+
+  await check('an attach runtime without a port is refused', async () => {
+    const hostMgr = new HostManager();
+    await throws(() => hostMgr.start(scratch('attach-noport'), 4685, {
+      runtime: { kind: 'command', id: 'attach', label: 'attach', command: '' },
+    }), 'missing appPort refused');
+    hostMgr.stopAll();
+  });
+}
+
+/* ---------------- upstream CSP vs the injected overlay ---------------- */
+async function cspTests() {
+  console.log('\nproxy csp');
+
+  await check('policies that already allow same-origin pass through untouched', () => {
+    for (const policy of [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline'; connect-src 'self'",
+      'default-src *',
+      '',
+    ]) {
+      eq(adjustCsp(policy).changed, [], policy + ': ');
+    }
+  });
+
+  await check('nonce-only and none policies gain exactly a self allowance', () => {
+    const nonce = adjustCsp("script-src 'nonce-abc123'; connect-src 'self'");
+    eq(nonce.changed, ['script-src']);
+    ok(nonce.value.includes("script-src 'nonce-abc123' 'self'"), nonce.value);
+    ok(nonce.value.includes("connect-src 'self'"), 'connect untouched: ' + nonce.value);
+
+    const none = adjustCsp("script-src 'none'");
+    eq(none.changed, ['script-src']);
+    ok(none.value.includes("script-src 'self'"), none.value);
+    ok(!none.value.includes("'none'"), "'none' cannot coexist with 'self': " + none.value);
+  });
+
+  await check('a restrictive default-src grows specific directives, not itself', () => {
+    const result = adjustCsp("default-src 'nonce-x'; img-src *");
+    eq(result.changed.sort(), ['connect-src', 'script-src']);
+    ok(result.value.startsWith("default-src 'nonce-x'"), 'default-src itself unchanged: ' + result.value);
+    ok(result.value.includes("script-src 'nonce-x' 'self'"), result.value);
+    ok(result.value.includes("connect-src 'nonce-x' 'self'"), result.value);
+  });
+
+  await check('script-src-elem is patched when it is the governing directive', () => {
+    const result = adjustCsp("script-src 'self'; script-src-elem 'nonce-x'");
+    eq(result.changed, ['script-src-elem']);
+    ok(result.value.includes("script-src-elem 'nonce-x' 'self'"), result.value);
+  });
+
+  await check('the proxy rewrites CSP only on pages it injects into, and warns', async () => {
+    const CSP = "script-src 'nonce-abc'; connect-src 'none'";
+    const upstream = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Security-Policy': CSP });
+      res.end('<html><body>app</body></html>');
+    });
+    await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    const warns = [];
+    let inject = true;
+    const { handler } = makeProxyHandler(() => ({ status: 'ready', port: upstream.address().port }), {
+      warn: message => warns.push(message),
+      transformHtml: () => (inject ? (buf => buf) : null),
+    });
+    const front = http.createServer(handler);
+    await new Promise(resolve => front.listen(0, '127.0.0.1', resolve));
+    const get = () => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port: front.address().port, path: '/' }, res => {
+        res.resume();
+        res.on('end', () => resolve(res.headers['content-security-policy']));
+      }).on('error', reject);
+    });
+    try {
+      const patched = await get();
+      ok(patched.includes("script-src 'nonce-abc' 'self'"), 'script allowed: ' + patched);
+      ok(patched.includes("connect-src 'self'"), 'connect allowed: ' + patched);
+      eq(warns.length, 1, 'one WARN per rewrite: ');
+      ok(/Content-Security-Policy/.test(warns[0]), warns[0]);
+
+      inject = false; // overlay off → the app's own policy passes byte-exact
+      eq(await get(), CSP);
+      eq(warns.length, 1, 'no warn without a rewrite: ');
+    } finally {
+      front.close(); front.closeAllConnections?.();
+      upstream.close(); upstream.closeAllConnections?.();
+    }
+  });
+}
+
 /* ---------------- sharing ---------------- */
 async function sharingTests() {
   console.log('\nsharing');
@@ -1817,6 +2139,8 @@ async function sharingTests() {
   // After projectTests: registering a project here would shift the ports it
   // asserts absolutely.
   await runtimeTests();
+  await attachTests();
+  await cspTests();
   await sharingTests();
   await liveReloadTests();
   await reviewStoreTests();

@@ -151,9 +151,11 @@ lib/capture.js   drives the bundled SingleFile CLI
 lib/extract.js   snapshot -> editable files
 lib/entry.js     which page is a capture's real homepage
 lib/server.js    local host — files off disk, or a proxy to a project's dev server
-lib/runtimes.js  what a folder needs to become a website (detection + commands)
+lib/runtimes.js  what a folder needs to become a website (detection + commands + attach)
 lib/runner.js    supervises that process: spawn, readiness, logs, kill the tree
 lib/proxy.js     forwards requests (and HMR websockets) to it, injecting as it goes
+lib/studioBrowser.js  the per-project browsing window (console capture, presets, Copy for agent)
+lib/checklists.js     the built-in review checklists
 lib/palette.js   color scan / swap / undo
 lib/videofix.js  restores stripped <video> sources
 lib/zip.js       dependency-free ZIP writer
@@ -164,6 +166,22 @@ lib/logger.js    rotating log file
 renderer/        the UI
 scripts/         test, smoke and e2e harnesses
 ```
+
+### The overlay's embed API — `window.__ssBridge`
+
+Pages served in review mode expose a small scripting surface on `window.__ssBridge`. It is how
+Studio Browser's chrome drives the overlay, and how the acceptance tests script a review; treat
+it as a public contract, not a debug hook. The useful calls:
+
+| Call | What it does |
+|---|---|
+| `setAnnotating(on)` / `isAnnotating()` | flip or read annotate mode |
+| `select(selector)` | select an element and open the annotation panel |
+| `setInput({rating, severity, axes, why, want})` / `save()` | fill and save the open draft |
+| `agentContext()` | the current selection/draft, shaped for "Copy for agent" |
+| `editAnnotation(id)` / `openPin(id)` / `resolve(id, rating, asAnchor)` | work with saved notes |
+| `export()` / `refresh()` / `cyclePins(step)` | what the toolbar buttons do |
+| `embedded` | true inside a Studio Browser window |
 
 Two constraints worth knowing before you refactor:
 

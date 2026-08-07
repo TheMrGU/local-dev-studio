@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Studio Browser</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="studio-browser.css">
+</head>
+<body class="sb-body">
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></symbol>
+  <symbol id="i-forward" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2Z"/><circle cx="12" cy="13" r="4"/></symbol>
+  <symbol id="i-note" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/><path d="M8 9h8M8 13h5"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6M12 19h8"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+</svg>
+
+<!-- The window's own bar: drag handle, nav, instruments. Windows paints its
+     three control buttons into the reserved slot on the right. -->
+<header class="topbar sb-bar">
+  <div class="sb-nav">
+    <button class="icon-btn" id="sbBack" title="Back" aria-label="Back"><svg class="icon"><use href="#i-back"/></svg></button>
+    <button class="icon-btn" id="sbForward" title="Forward" aria-label="Forward"><svg class="icon"><use href="#i-forward"/></svg></button>
+    <button class="icon-btn" id="sbReload" title="Reload" aria-label="Reload"><svg class="icon"><use href="#i-refresh"/></svg></button>
+  </div>
+  <button class="sb-path" id="sbPath" title="Click to copy the address">/</button>
+  <div class="sb-presets" role="group" aria-label="Viewport width">
+    <button data-w="375" title="Phone — 375px wide">375</button>
+    <button data-w="768" title="Tablet — 768px wide">768</button>
+    <button data-w="1440" title="Desktop — 1440px wide">1440</button>
+    <button data-w="full" class="on" title="Fill the window">Full</button>
+    <span class="sb-width mini" id="sbWidth"></span>
+  </div>
+  <div class="sb-tools">
+    <select id="sbVersion" class="hidden" title="View a snapshot — live serving stays untouched" aria-label="Version"></select>
+    <button id="sbAnnotate" class="sb-toggle on" title="Annotate — click any element to leave a note (A)">
+      <svg class="icon"><use href="#i-note"/></svg><span>Annotate</span></button>
+    <button id="sbCopy" title="Copy a self-contained spec block for the selected element — paste it into any agent chat">
+      <svg class="icon"><use href="#i-copy"/></svg><span>Copy for agent</span></button>
+    <button class="icon-btn" id="sbShot" title="Full-page screenshot" aria-label="Full-page screenshot"><svg class="icon"><use href="#i-camera"/></svg></button>
+    <button class="icon-btn sb-toggle" id="sbConsole" title="Console &amp; network drawer" aria-label="Console drawer"><svg class="icon"><use href="#i-terminal"/></svg></button>
+  </div>
+</header>
+
+<!-- The stage: the WebContentsView is positioned over #sbFrame by the main
+     process; this page only draws the surroundings and reports the rectangle. -->
+<div class="sb-stage" id="sbStage">
+  <div class="sb-frame" id="sbFrame">
+    <div class="sb-handle" id="sbHandle" title="Drag to resize"></div>
+  </div>
+</div>
+
+<div class="sb-drawer hidden" id="sbDrawer">
+  <div class="sb-drawer-head">
+    <div class="sb-chips" id="sbChips">
+      <button data-kind="all" class="on">All</button>
+      <button data-kind="error">Errors</button>
+      <button data-kind="warn">Warnings</button>
+      <button data-kind="log">Logs</button>
+      <button data-kind="network">Network</button>
+    </div>
+    <button id="sbClear" class="small ghost">Clear</button>
+  </div>
+  <div class="sb-log" id="sbLog" tabindex="0"></div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+
+<script src="studio-browser.js"></script>
+</body>
+</html>

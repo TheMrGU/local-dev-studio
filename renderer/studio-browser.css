@@ -1,0 +1,127 @@
+/* Studio Browser chrome — the frame around the site view. Everything visual
+   comes from style.css tokens; this file is only the layout this window has
+   and the main window doesn't. The WebContentsView is painted by the compositor
+   over #sbFrame, so that element is a measured hole, not a container. */
+
+.sb-body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.sb-bar { gap: 14px; flex: none; }
+.sb-nav { display: flex; gap: 2px; }
+
+.sb-path {
+  flex: 1 1 auto;
+  min-width: 80px;
+  max-width: 560px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--gray);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 10px;
+}
+.sb-path:hover { color: var(--white); }
+
+.sb-presets { display: flex; align-items: center; gap: 2px; }
+.sb-presets button {
+  padding: 4px 9px;
+  font-size: 12px;
+  border-radius: 7px;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--dim);
+}
+.sb-presets button:hover { color: var(--white); background: var(--surface-2); }
+.sb-presets button.on { background: var(--white); color: var(--ink); font-weight: 600; }
+.sb-width { min-width: 52px; font-family: var(--mono); }
+
+.sb-tools { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.sb-tools button { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; font-size: 12.5px; }
+.sb-tools .icon-btn { padding: 5px 7px; }
+.sb-toggle.on { background: var(--white); color: var(--ink); border-color: transparent; font-weight: 600; }
+#sbVersion { max-width: 190px; font-size: 12px; padding: 5px 8px; }
+
+/* ---------- stage ---------- */
+.sb-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  padding: 0;
+  background:
+    radial-gradient(circle at 50% 0, rgba(255, 255, 255, .03), transparent 60%),
+    var(--void);
+}
+.sb-frame {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  /* the view is composited over this box; the outline marks its edges when a
+     preset narrows it */
+  box-shadow: 0 0 0 1px var(--line);
+}
+.sb-frame.narrow { width: var(--sb-w, 375px); }
+.sb-handle {
+  position: absolute;
+  top: 0;
+  right: -7px;
+  width: 7px;
+  height: 100%;
+  cursor: ew-resize;
+  border-radius: 4px;
+  display: none;
+}
+.sb-frame.narrow .sb-handle { display: block; }
+.sb-handle:hover, .sb-handle.dragging { background: var(--line-3); }
+
+/* ---------- console drawer ---------- */
+.sb-drawer {
+  flex: none;
+  height: 230px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+.sb-drawer.hidden { display: none; }
+.sb-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.sb-chips { display: flex; gap: 4px; }
+.sb-chips button {
+  padding: 3px 10px;
+  font-size: 11.5px;
+  border-radius: 999px;
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--dim);
+}
+.sb-chips button:hover { color: var(--white); }
+.sb-chips button.on { background: var(--white); color: var(--ink); border-color: transparent; font-weight: 600; }
+.sb-log {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 6px 12px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.sb-line { white-space: pre-wrap; word-break: break-word; color: var(--gray); }
+.sb-line .ts { color: var(--faint); margin-right: 8px; }
+.sb-line.error { color: var(--danger); }
+.sb-line.warn { color: #E0B15C; }
+.sb-line.network { color: var(--dim); }
+.sb-empty { color: var(--faint); padding: 14px 0; }

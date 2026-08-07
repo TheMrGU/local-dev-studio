@@ -19,6 +19,7 @@ const BROWSER_GLOBALS = {
   URL: 'readonly', localStorage: 'readonly', fetch: 'readonly',
   location: 'readonly', getComputedStyle: 'readonly',
   requestAnimationFrame: 'readonly', CSS: 'readonly',
+  ResizeObserver: 'readonly', FileReader: 'readonly',
 };
 
 export default [

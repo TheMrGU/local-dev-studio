@@ -8,10 +8,13 @@
  */
 (() => {
   'use strict';
-  if (window.__ssReviewLoaded) return;
-  window.__ssReviewLoaded = true;
+  if (window.__ssBridgeLoaded) return;
+  window.__ssBridgeLoaded = true;
 
   const API = '/__siteslurp__/review/';
+  // Inside Studio Browser the window IS the viewport instrument — its presets
+  // supersede the popup-size buttons, so those hide themselves there.
+  const EMBEDDED = /SiteSlurpStudioBrowser/.test(navigator.userAgent);
   const state = {
     config: null,          // GET state payload
     annotating: true,      // select-mode toggle
@@ -20,6 +23,9 @@
     draft: null,           // open panel context
     hoverEl: null,
     dragStart: null,
+    childTrail: [],        // elements left behind by ArrowUp, for ArrowDown
+    lastSaved: null,       // {scope, context, input} of the last saved note
+    pinCycle: -1,          // index for [ / ] pin cycling
   };
 
   const api = {
@@ -231,6 +237,32 @@
     .anchor-row input[type="checkbox"] { accent-color: ${ACCENT}; }
     .orphan-row { display: flex; justify-content: space-between; gap: 8px; align-items: center;
           padding: 8px 0; border-bottom: 1px solid ${LINE}; font-size: 12.5px; }
+    .crumbs { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 8px; }
+    .crumb { border: 1px solid ${LINE}; background: none; color: ${DIM}; border-radius: 5px;
+          font-size: 10.5px; padding: 2px 6px; cursor: pointer; font-family: Consolas, monospace; }
+    .crumb:hover { color: #fff; border-color: rgba(255,255,255,0.3); }
+    .crumb.here { background: ${RAISED}; color: #fff; cursor: default; }
+    .ref-img { display: block; max-width: 100%; max-height: 140px; border-radius: 8px;
+          border: 1px solid ${LINE}; margin-top: 8px; }
+    .cheat { position: fixed; z-index: 2147483647; right: 18px; bottom: 64px; width: 280px;
+          background: ${SURFACE}; color: ${GRAY}; border: 1px solid ${LINE}; border-radius: 14px;
+          box-shadow: 0 24px 70px rgba(0,0,0,0.6); padding: 14px; font-size: 12px; }
+    .cheat h3 { margin: 0 0 8px; font-size: 12.5px; color: #fff; }
+    .cheat .k { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; }
+    .cheat kbd { background: ${RAISED}; border: 1px solid ${LINE}; border-radius: 4px;
+          padding: 1px 6px; font-family: Consolas, monospace; font-size: 10.5px; color: #fff; }
+    .check-item { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; padding: 4px 0; cursor: pointer; }
+    .check-item input[type="checkbox"] { accent-color: ${ACCENT}; margin-top: 2px; flex: none; }
+    select.picker { width: 100%; background: ${RAISED}; color: #fff; border: 1px solid ${LINE};
+          border-radius: 8px; padding: 6px 8px; font-size: 12px; margin-top: 4px; }
+    .imgtool { position: fixed; z-index: 2147483644; right: 18px; top: 18px; display: flex; gap: 8px;
+          align-items: center; background: rgba(10,10,11,0.93); color: ${GRAY}; border: 1px solid ${LINE};
+          padding: 8px 12px; border-radius: 12px; font-size: 12px; box-shadow: 0 14px 44px rgba(0,0,0,0.5); }
+    .imgtool input[type="range"] { width: 110px; accent-color: ${ACCENT}; }
+    .imgtool .grip { cursor: move; user-select: none; padding: 2px 6px; border: 1px solid ${LINE};
+          border-radius: 6px; }
+    .imgtool button { background: none; border: none; color: ${GRAY}; cursor: pointer; font-size: 12px; padding: 2px 6px; }
+    .imgtool button:hover { color: #fff; }
   </style>`;
 
   const el = (tag, cls, text) => {
@@ -277,6 +309,7 @@
   function clearSelection() {
     state.selected = [];
     state.region = null;
+    state.childTrail = [];
     redrawSelection();
     for (const rgn of root.querySelectorAll('.rgn')) rgn.remove();
   }
@@ -289,25 +322,64 @@
     clearSelection();
   }
 
-  function openPanel(scope, context) {
+  /** Short readable tag for a breadcrumb chip. */
+  const crumbLabel = node => node.tagName.toLowerCase()
+    + (node.id && /^[a-zA-Z][\w-]*$/.test(node.id) ? '#' + node.id
+      : semanticClasses(node).slice(0, 1).map(c => '.' + c).join(''));
+
+  /**
+   * @param {string} scope
+   * @param {object} context
+   * @param {{annotation?: object}} [opts] pass a saved annotation to edit it in
+   *   place — same panel, pre-filled, saving through the update endpoint.
+   */
+  function openPanel(scope, context, opts = {}) {
     if (panel) panel.remove();
+    const editing = opts.annotation || null;
     state.draft = {
       scope,
       context,
-      input: { rating: null, severity: 'should-fix', axes: [], why: '', want: '' },
-      annotationId: null,
+      input: editing
+        ? {
+          rating: editing.input.rating, severity: editing.input.severity,
+          axes: editing.input.axes.slice(), why: editing.input.why, want: editing.input.want,
+        }
+        : { rating: null, severity: 'should-fix', axes: [], why: '', want: '' },
+      annotationId: editing ? editing.id : null,
+      editing: !!editing,
     };
     panel = el('div', 'panel');
 
     const titles = { element: 'Annotate element', region: 'Annotate region', page: 'Page note', global: 'Site-wide note' };
-    panel.appendChild(el('h3', '', titles[scope] || 'Annotate'));
+    panel.appendChild(el('h3', '', editing ? 'Edit annotation' : (titles[scope] || 'Annotate')));
+
+    // Ancestor breadcrumb: where this element sits, each chip clickable to
+    // re-aim the note one level up or back down.
+    if (!editing && scope === 'element' && state.selected.length === 1) {
+      const chain = [];
+      for (let node = state.selected[0]; node && node !== document.body; node = node.parentElement) chain.unshift(node);
+      const crumbs = el('div', 'crumbs');
+      for (const node of chain.slice(-6)) {
+        const chip = el('button', 'crumb' + (node === state.selected[0] ? ' here' : ''), crumbLabel(node));
+        if (node !== state.selected[0]) {
+          chip.addEventListener('click', () => {
+            state.childTrail = [];
+            state.selected = [node];
+            redrawSelection();
+            openPanel('element', captureContext(state.selected, null));
+          });
+        }
+        crumbs.appendChild(chip);
+      }
+      panel.appendChild(crumbs);
+    }
     if (context.selector) panel.appendChild(el('div', 'sel-label', context.selector));
 
     // rating 1–10, one tap
     panel.appendChild(el('div', 'lbl', 'Rating (optional — needs a reason)'));
     const rateRow = el('div', 'row');
     for (let i = 1; i <= 10; i++) {
-      const b = el('button', 'rate', String(i));
+      const b = el('button', 'rate' + (state.draft.input.rating === i ? ' on' : ''), String(i));
       b.addEventListener('click', () => {
         state.draft.input.rating = state.draft.input.rating === i ? null : i;
         rateRow.querySelectorAll('.rate').forEach((x, idx) => x.classList.toggle('on', idx + 1 === state.draft.input.rating));
@@ -320,7 +392,7 @@
     // severity
     const sevRow = el('div', 'row');
     for (const sev of ['blocking', 'should-fix', 'nitpick']) {
-      const b = el('button', 'chip' + (sev === 'should-fix' ? ' sev-on' : ''), sev);
+      const b = el('button', 'chip' + (sev === state.draft.input.severity ? ' sev-on' : ''), sev);
       b.addEventListener('click', () => {
         state.draft.input.severity = sev;
         sevRow.querySelectorAll('.chip').forEach(x => x.classList.toggle('sev-on', x.textContent === sev));
@@ -332,7 +404,7 @@
     // axes
     const axesRow = el('div', 'row');
     for (const axis of (state.config ? state.config.axes : [])) {
-      const b = el('button', 'chip', axis);
+      const b = el('button', 'chip' + (state.draft.input.axes.includes(axis) ? ' on' : ''), axis);
       b.addEventListener('click', () => {
         const list = state.draft.input.axes;
         const at = list.indexOf(axis);
@@ -352,6 +424,7 @@
     panel.appendChild(whyLbl);
     const why = document.createElement('textarea');
     why.placeholder = 'The diagnosis — what specifically fails here?';
+    why.value = state.draft.input.why;
     why.addEventListener('input', () => { state.draft.input.why = why.value; refreshSave(); });
     panel.appendChild(why);
     wireVoice(mic, why, () => { state.draft.input.why = why.value; refreshSave(); });
@@ -359,20 +432,63 @@
     panel.appendChild(el('div', 'lbl', 'What I want'));
     const want = document.createElement('textarea');
     want.placeholder = 'The direction — what should it become?';
+    want.value = state.draft.input.want;
     want.addEventListener('input', () => { state.draft.input.want = want.value; });
     panel.appendChild(want);
+
+    // Site-wide notes can pull from a built-in checklist: every ticked prompt
+    // saves as its own global note, so exports treat them like typed feedback.
+    let collectTicked = () => [];
+    if (scope === 'global' && state.config && Array.isArray(state.config.checklists) && state.config.checklists.length) {
+      panel.appendChild(el('div', 'lbl', 'Checklist (optional)'));
+      const picker = document.createElement('select');
+      picker.className = 'picker';
+      const none = document.createElement('option');
+      none.value = '';
+      none.textContent = 'No checklist';
+      picker.appendChild(none);
+      for (const list of state.config.checklists) {
+        const option = document.createElement('option');
+        option.value = list.id;
+        option.textContent = list.name;
+        picker.appendChild(option);
+      }
+      const itemsBox = el('div', '');
+      picker.addEventListener('change', () => {
+        itemsBox.innerHTML = '';
+        const list = state.config.checklists.find(c => c.id === picker.value);
+        if (!list) return;
+        for (const item of list.items) {
+          const row = el('label', 'check-item');
+          const box = document.createElement('input');
+          box.type = 'checkbox';
+          box.dataset.text = `[${list.name}] ${item}`;
+          row.appendChild(box);
+          row.appendChild(el('span', '', item));
+          itemsBox.appendChild(row);
+        }
+      });
+      panel.appendChild(picker);
+      panel.appendChild(itemsBox);
+      collectTicked = () => [...itemsBox.querySelectorAll('input:checked')].map(box => box.dataset.text);
+    }
 
     const err = el('div', 'err');
     panel.appendChild(err);
 
     const actions = el('div', 'actions');
-    const save = el('button', 'save', 'Save');
-    save.addEventListener('click', () => submit(false));
+    const save = el('button', 'save', editing ? 'Save changes' : 'Save');
+    save.addEventListener('click', () => submit({}));
     actions.appendChild(save);
-    if (scope === 'element') {
-      const ref = el('button', 'ghost', 'Save + add reference…');
-      ref.addEventListener('click', () => submit(true));
+    if (scope === 'element' && !editing) {
+      const ref = el('button', 'ghost', '+ reference…');
+      ref.title = 'Save, then point at an element on another site in the library';
+      ref.addEventListener('click', () => submit({ reference: true }));
       actions.appendChild(ref);
+      const img = el('button', 'ghost', '+ image…');
+      img.title = 'Save, then attach a reference image (a design, a screenshot of how it should look)';
+      img.addEventListener('click', () => submit({ image: true }));
+      actions.appendChild(img);
     }
     const cancel = el('button', 'ghost', 'Cancel');
     cancel.addEventListener('click', closePanel);
@@ -393,17 +509,43 @@
     }
     refreshSave();
 
-    async function submit(pickReference) {
+    async function submit({ reference = false, image = false }) {
       try {
-        const { annotation } = await api.post('annotate', {
-          scope: state.draft.scope, context: state.draft.context, input: state.draft.input,
-        });
-        state.draft.annotationId = annotation.id;
+        const draft = state.draft;
+        if (draft.editing) {
+          await api.post('update', { id: draft.annotationId, patch: { input: draft.input } });
+          await refreshState();
+          renderPins();
+          toast('Annotation updated');
+          closePanel();
+          return;
+        }
+        const ticked = collectTicked();
+        const typed = draft.input.why.trim() || draft.input.want.trim() || draft.input.rating !== null;
+        let annotation = null;
+        if (typed || !ticked.length) {
+          ({ annotation } = await api.post('annotate', {
+            scope: draft.scope, context: draft.context, input: draft.input,
+          }));
+          draft.annotationId = annotation.id;
+          state.lastSaved = { scope: draft.scope, context: draft.context, input: draft.input };
+        }
+        for (const text of ticked) {
+          await api.post('annotate', {
+            scope: 'global', context: draft.context,
+            input: { severity: 'should-fix', why: text },
+          });
+        }
         await refreshState();
-        if (pickReference) {
+        if (reference && annotation) {
           openReferencePicker(annotation.id);
+        } else if (image && annotation) {
+          closePanel();
+          attachImage(annotation.id);
         } else {
-          toast(`Saved — ${countLabel()}`);
+          toast(ticked.length
+            ? `Saved — ${ticked.length} checklist note${ticked.length === 1 ? '' : 's'}${typed ? ' + your note' : ''}`
+            : `Saved — ${countLabel()}`);
           closePanel();
         }
       } catch (e) {
@@ -422,6 +564,36 @@
     panel.style.top = top + 'px';
     root.appendChild(panel);
     why.focus();
+  }
+
+  /* ---------- reference image upload ---------- */
+  // A file from disk, pushed through the same-origin API (2 MB cap server-side
+  // and here). The page never sees the picker — it lives in the shadow root.
+  function attachImage(annotationId) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg,image/webp,image/gif';
+    input.style.display = 'none';
+    input.addEventListener('change', () => {
+      const file = input.files && input.files[0];
+      input.remove();
+      if (!file) return;
+      if (file.size > 1.4 * 1024 * 1024) {
+        toast('That image is over the 2 MB upload cap — resize it first.');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          await api.post('image', { id: annotationId, dataUrl: reader.result });
+          await refreshState();
+          toast('Reference image attached — it exports with the annotation.');
+        } catch (e) { toast(e.message); }
+      };
+      reader.readAsDataURL(file);
+    });
+    root.appendChild(input);
+    input.click();
   }
 
   function wireVoice(button, textarea, onChange) {
@@ -561,6 +733,13 @@
     if (annotation.context.selector) pinPop.appendChild(el('div', 'sel-label', annotation.context.selector));
     if (annotation.input.why) pinPop.appendChild(el('p', 'pin-why', annotation.input.why));
     if (annotation.input.want) pinPop.appendChild(el('p', 'pin-want', '→ ' + annotation.input.want));
+    if (annotation.context.referenceImage) {
+      const img = document.createElement('img');
+      img.className = 'ref-img';
+      img.alt = 'Reference image';
+      img.src = API + 'image/' + encodeURIComponent(annotation.id);
+      pinPop.appendChild(img);
+    }
 
     const actions = el('div', 'actions');
     if (annotation.resolved) {
@@ -600,6 +779,17 @@
       });
       actions.appendChild(resolveBtn);
     }
+    const edit = el('button', 'ghost', 'Edit');
+    edit.title = 'Reopen this note pre-filled and change it';
+    edit.addEventListener('click', () => {
+      closePinPop();
+      openPanel(annotation.scope, annotation.context, { annotation });
+    });
+    actions.appendChild(edit);
+    const img = el('button', 'ghost', annotation.context.referenceImage ? 'Replace image…' : 'Attach image…');
+    img.title = 'Attach a reference image (a design, how it should look)';
+    img.addEventListener('click', () => { closePinPop(); attachImage(annotation.id); });
+    actions.appendChild(img);
     const del = el('button', 'ghost', 'Delete');
     del.addEventListener('click', async () => {
       await api.post('delete', { id: annotation.id }).catch(() => {});
@@ -671,6 +861,13 @@
     return `${mine} note${mine === 1 ? '' : 's'}`;
   };
 
+  function setAnnotating(on) {
+    state.annotating = !!on;
+    if (bar.isConnected) buildBar();
+    hideHover();
+    return state.annotating;
+  }
+
   function buildBar() {
     bar.innerHTML = '';
     bar.appendChild(el('span', 'brand', 'Review'));
@@ -678,28 +875,34 @@
     bar.appendChild(el('span', 'sep'));
 
     const annotate = el('button', state.annotating ? 'on' : '', 'Annotate');
-    annotate.title = 'Toggle element selection (browse the site normally when off)';
-    annotate.addEventListener('click', () => {
-      state.annotating = !state.annotating;
-      annotate.classList.toggle('on', state.annotating);
-      hideHover();
-    });
+    annotate.title = 'Toggle element selection (browse the site normally when off) — A';
+    annotate.addEventListener('click', () => setAnnotating(!state.annotating));
     bar.appendChild(annotate);
 
     const pageNote = el('button', '', 'Page note');
     pageNote.addEventListener('click', () => openPanel('page', captureContext([], null)));
     bar.appendChild(pageNote);
     const siteNote = el('button', '', 'Site note');
+    siteNote.title = 'A site-wide note — checklists live here too';
     siteNote.addEventListener('click', () => openPanel('global', captureContext([], null)));
     bar.appendChild(siteNote);
 
-    bar.appendChild(el('span', 'sep'));
-    for (const [label, w, h] of [['375', 375, 812], ['768', 768, 1024], ['1440', 1440, 900]]) {
-      const b = el('button', '', label);
-      b.title = `Open this page at ${w}px to annotate that breakpoint`;
-      b.addEventListener('click', () => window.open(location.href, '_blank',
-        `width=${w},height=${h},noopener`));
-      bar.appendChild(b);
+    const imgTool = el('button', imageTool.active ? 'on' : '', 'Overlay');
+    imgTool.title = 'Lay a reference image over the page at adjustable opacity';
+    imgTool.addEventListener('click', () => (imageTool.active ? imageTool.close() : imageTool.open()));
+    bar.appendChild(imgTool);
+
+    // Popup-size buttons only outside Studio Browser — its viewport presets
+    // do this job properly (they resize the view, not a popup).
+    if (!EMBEDDED) {
+      bar.appendChild(el('span', 'sep'));
+      for (const [label, w, h] of [['375', 375, 812], ['768', 768, 1024], ['1440', 1440, 900]]) {
+        const b = el('button', '', label);
+        b.title = `Open this page at ${w}px to annotate that breakpoint`;
+        b.addEventListener('click', () => window.open(location.href, '_blank',
+          `width=${w},height=${h},noopener`));
+        bar.appendChild(b);
+      }
     }
 
     bar.appendChild(el('span', 'sep'));
@@ -717,6 +920,7 @@
     }
 
     const exportBtn = el('button', '', 'Export');
+    exportBtn.title = 'Write REVIEW.md + annotations.json + shots for an agent — E';
     exportBtn.addEventListener('click', doExport);
     bar.appendChild(exportBtn);
 
@@ -727,6 +931,144 @@
       location.reload();
     });
     bar.appendChild(done);
+
+    const cheat = el('button', '', '?');
+    cheat.title = 'Keyboard shortcuts';
+    cheat.addEventListener('click', toggleCheatsheet);
+    bar.appendChild(cheat);
+  }
+
+  /* ---------- keyboard cheatsheet ---------- */
+  let cheatEl = null;
+  function toggleCheatsheet() {
+    if (cheatEl) { cheatEl.remove(); cheatEl = null; return; }
+    cheatEl = el('div', 'cheat');
+    cheatEl.appendChild(el('h3', '', 'Keyboard'));
+    const rows = [
+      ['A', 'Toggle annotate mode'],
+      ['E', 'Export the review'],
+      ['[ and ]', 'Cycle through the pins'],
+      ['Esc', 'Close the panel / clear selection'],
+      ['↑', 'Select the parent element'],
+      ['↓', 'Back into the child you came from'],
+      ['Shift+click', 'Add to the selection'],
+      ['Drag', 'Annotate a region'],
+      ['?', 'This cheatsheet'],
+    ];
+    for (const [key, what] of rows) {
+      const row = el('div', 'k');
+      row.appendChild(el('span', '', what));
+      const kbd = document.createElement('kbd');
+      kbd.textContent = key;
+      row.appendChild(kbd);
+      cheatEl.appendChild(row);
+    }
+    root.appendChild(cheatEl);
+  }
+
+  /* ---------- page-level reference image overlay ----------
+   * A design comp at 0–100% opacity over the live page. pointer-events: none
+   * throughout — it is a lens, never a layer you can click. Nothing persists;
+   * it lives and dies with the tab. */
+  const imageTool = {
+    active: false,
+    wrap: null,
+    panel: null,
+    offset: { x: 0, y: 0 },
+    open() {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/png,image/jpeg,image/webp,image/gif';
+      input.style.display = 'none';
+      input.addEventListener('change', () => {
+        const file = input.files && input.files[0];
+        input.remove();
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => this.show(reader.result);
+        reader.readAsDataURL(file);
+      });
+      root.appendChild(input);
+      input.click();
+    },
+    show(dataUrl) {
+      this.close();
+      this.active = true;
+      this.offset = { x: 0, y: 0 };
+      this.wrap = el('div', '');
+      Object.assign(this.wrap.style, {
+        position: 'fixed', inset: '0', zIndex: '2147483590', pointerEvents: 'none',
+        overflow: 'hidden',
+      });
+      const img = document.createElement('img');
+      img.src = dataUrl;
+      img.alt = '';
+      Object.assign(img.style, {
+        position: 'absolute', left: '0', top: '0', opacity: '0.5',
+        width: '100%', height: 'auto', pointerEvents: 'none',
+      });
+      this.wrap.appendChild(img);
+      root.appendChild(this.wrap);
+
+      this.panel = el('div', 'imgtool');
+      this.panel.appendChild(el('span', '', 'Overlay'));
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = '0';
+      slider.max = '100';
+      slider.value = '50';
+      slider.title = 'Opacity';
+      slider.addEventListener('input', () => { img.style.opacity = String(slider.value / 100); });
+      this.panel.appendChild(slider);
+      const fit = el('button', '', '1:1');
+      fit.title = 'Toggle between fit-to-width and the image\'s own size';
+      fit.addEventListener('click', () => {
+        const natural = img.style.width !== '100%';
+        img.style.width = natural ? '100%' : 'auto';
+        fit.textContent = natural ? '1:1' : 'fit';
+      });
+      this.panel.appendChild(fit);
+      const grip = el('span', 'grip', 'move');
+      grip.title = 'Drag to move the image';
+      grip.addEventListener('mousedown', down => {
+        down.preventDefault();
+        const start = { x: down.clientX - this.offset.x, y: down.clientY - this.offset.y };
+        const move = e => {
+          this.offset = { x: e.clientX - start.x, y: e.clientY - start.y };
+          img.style.transform = `translate(${this.offset.x}px, ${this.offset.y}px)`;
+        };
+        const up = () => {
+          document.removeEventListener('mousemove', move);
+          document.removeEventListener('mouseup', up);
+        };
+        document.addEventListener('mousemove', move);
+        document.addEventListener('mouseup', up);
+      });
+      this.panel.appendChild(grip);
+      const close = el('button', '', '✕');
+      close.title = 'Remove the overlay image';
+      close.addEventListener('click', () => this.close());
+      this.panel.appendChild(close);
+      root.appendChild(this.panel);
+      if (bar.isConnected) buildBar();
+    },
+    close() {
+      if (this.wrap) { this.wrap.remove(); this.wrap = null; }
+      if (this.panel) { this.panel.remove(); this.panel = null; }
+      this.active = false;
+      if (bar.isConnected) buildBar();
+    },
+  };
+
+  /* ---------- pin cycling ([ and ]) ---------- */
+  function cyclePins(step) {
+    const list = annotationsForPage().filter(a => locate(a) || a.context.boundingBox);
+    if (!list.length) { toast('No pins on this page yet.'); return; }
+    state.pinCycle = ((state.pinCycle + step) % list.length + list.length) % list.length;
+    const annotation = list[state.pinCycle];
+    const target = locate(annotation);
+    if (target) target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    openPinPopup(annotation);
   }
 
   async function doExport() {
@@ -821,6 +1163,7 @@
       openPanel('element', captureContext(state.selected, null));
       return;
     }
+    state.childTrail = []; // a fresh click starts a fresh ladder
     state.selected = [target];
     redrawSelection();
     openPanel('element', captureContext(state.selected, null));
@@ -834,20 +1177,72 @@
     }
   }, true);
 
+  /** True when the key press belongs to a field the user is typing in —
+   *  ours in the shadow root or the page's own. */
+  function typingIn(event) {
+    const target = (event.composedPath ? event.composedPath()[0] : event.target) || null;
+    if (!target || !target.tagName) return false;
+    const tag = target.tagName.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || !!target.isContentEditable;
+  }
+
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
+      if (cheatEl) { toggleCheatsheet(); return; }
       if (panel) closePanel();
       else clearSelection();
       hideHover();
+      return;
     }
-    if (event.key === 'ArrowUp' && state.selected.length === 1 && panel) {
+    const typing = typingIn(event);
+
+    // Element ladder: ArrowUp climbs to the parent, ArrowDown steps back into
+    // the child it came from — the trail remembers the way down.
+    if (event.key === 'ArrowUp' && !typing && state.selected.length === 1 && panel) {
       const parent = state.selected[0].parentElement;
       if (parent && parent !== document.body && parent !== document.documentElement) {
         event.preventDefault();
+        state.childTrail.push(state.selected[0]);
         state.selected = [parent];
         redrawSelection();
         openPanel('element', captureContext(state.selected, null));
       }
+      return;
+    }
+    if (event.key === 'ArrowDown' && !typing && state.selected.length === 1 && panel) {
+      const child = state.childTrail.pop();
+      if (child && child.isConnected && state.selected[0].contains(child)) {
+        event.preventDefault();
+        state.selected = [child];
+        redrawSelection();
+        openPanel('element', captureContext(state.selected, null));
+      }
+      return;
+    }
+
+    if (typing || event.ctrlKey || event.metaKey || event.altKey || panel) return;
+    switch (event.key) {
+      case 'a': case 'A':
+        event.preventDefault();
+        setAnnotating(!state.annotating);
+        break;
+      case 'e': case 'E':
+        event.preventDefault();
+        doExport();
+        break;
+      case '[':
+        event.preventDefault();
+        cyclePins(-1);
+        break;
+      case ']':
+        event.preventDefault();
+        cyclePins(1);
+        break;
+      case '?':
+        event.preventDefault();
+        toggleCheatsheet();
+        break;
+      default:
     }
   }, true);
 
@@ -872,13 +1267,31 @@
     renderPins();
   }
 
-  // Debug/automation surface — the acceptance test drives review through this.
-  window.__ssReview = {
+  // The official embed API. Studio Browser's chrome drives the overlay through
+  // it (annotate toggle, Copy for agent), and the acceptance tests script it.
+  // Formerly a debug-only surface — same shape, now a contract.
+  window.__ssBridge = {
     state,
     api,
+    embedded: EMBEDDED,
+    /** Turn element selection on or off; returns the resulting state. */
+    setAnnotating,
+    isAnnotating: () => state.annotating,
+    /** What "Copy for agent" needs: the open draft, else the live selection,
+     *  else the last note saved this page-load. Null when there is nothing. */
+    agentContext: () => {
+      if (state.draft) {
+        return { scope: state.draft.scope, context: state.draft.context, input: state.draft.input };
+      }
+      if (state.selected.length) {
+        return { scope: 'element', context: captureContext(state.selected, null), input: null };
+      }
+      return state.lastSaved;
+    },
     select: selector => {
       const target = document.querySelector(selector);
       if (!target) throw new Error('no element: ' + selector);
+      state.childTrail = [];
       state.selected = [target];
       redrawSelection();
       openPanel('element', captureContext(state.selected, null));
@@ -888,12 +1301,23 @@
     setInput: fields => { Object.assign(state.draft.input, fields); return state.draft.input; },
     save: () => api.post('annotate', {
       scope: state.draft.scope, context: state.draft.context, input: state.draft.input,
-    }).then(r => { closePanel(); return r; }),
+    }).then(r => {
+      state.lastSaved = { scope: state.draft.scope, context: state.draft.context, input: state.draft.input };
+      closePanel();
+      return r;
+    }),
+    editAnnotation: id => {
+      const annotation = state.config.annotations.find(a => a.id === id);
+      if (!annotation) throw new Error('no annotation: ' + id);
+      openPanel(annotation.scope, annotation.context, { annotation });
+      return true;
+    },
     export: doExport,
     refresh: refreshState,
     goodSelector,
     fallbackSelector,
     pins: () => pinEls.length,
+    cyclePins,
     openPin: id => {
       const annotation = state.config.annotations.find(a => a.id === id);
       if (!annotation) throw new Error('no annotation: ' + id);

@@ -1,5 +1,5 @@
 // SiteSlurp — capture any website, extract it into editable files, host it locally.
-const { app, BrowserWindow, ipcMain, shell, dialog, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, screen, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -23,8 +23,9 @@ const { listLibrary, describeLocal, invalidate } = require('./lib/library');
 const projects = require('./lib/projects');
 const reviews = require('./lib/reviews');
 const calibration = require('./lib/calibration');
-const { exportReview } = require('./lib/reviewExport');
+const { exportReview, renderAnnotation } = require('./lib/reviewExport');
 const { ReviewManager } = require('./lib/review');
+const { StudioBrowsers } = require('./lib/studioBrowser');
 const { captureAnnotationShots } = require('./lib/shots');
 const { locateSource } = require('./lib/sourceline');
 const { makeThumb } = require('./lib/thumbs');
@@ -138,15 +139,61 @@ hosts.onHostChange = (dir, hosted) => {
   const project = projects.byPath(dir);
   if (project && project.autoSnapshot) versions.autoWatch(project);
 };
+// Proxy surprises (upstream CSP rewrites) belong in the log, as WARNs.
+hosts.onWarn = message => log.warn('proxy', message);
+
+// ---------- studio browser ----------
+// One dedicated window per project: nav chrome, viewport presets, version
+// picker, console capture, "Copy for agent". The window module owns the
+// Electron pieces; the annotation-block formatting is shared with REVIEW.md.
+const studioBrowsers = new StudioBrowsers({
+  chromePath: path.join(__dirname, 'renderer', 'studio-browser.html'),
+  preloadPath: path.join(__dirname, 'preload.js'),
+  manualShotsDir: () => path.join(app.getPath('userData'), 'shots', 'manual'),
+  log,
+  // "Copy for agent": the current selection rendered exactly like a REVIEW.md
+  // annotation — same formatter, plus file:line and the console tail.
+  agentBlock: (project, payload, consoleTail) => {
+    const runtime = projects.runtimeFor(project);
+    const devServer = runtime.kind === 'command';
+    const ctx = { ...(payload.context || {}) };
+    if (!project.attachOnly && (payload.scope || 'element') === 'element') {
+      try {
+        const located = locateSource(project.path, { context: ctx }, {
+          entry: project.entryFile, generated: devServer,
+        });
+        Object.assign(ctx, located);
+      } catch { /* an unlocatable element still copies fine */ }
+    }
+    if (consoleTail) ctx.consoleTail = consoleTail;
+    const input = {
+      rating: null, severity: 'should-fix', axes: [], why: '', want: '',
+      ...(payload.input || {}),
+    };
+    return renderAnnotation(
+      { scope: payload.scope || 'element', context: ctx, input },
+      id => { const p = id && projects.byId(id); return p ? p.name : null; },
+      { devServer },
+    );
+  },
+});
 
 /** Fill in what the overlay can't know: source file/line from the served
- *  files, then element + context screenshots from an offscreen render. */
+ *  files, screenshots from an offscreen render, and — when the note was made
+ *  in a Studio Browser window whose console holds errors — the console tail. */
 async function enrichAnnotation(project, annotation) {
   try {
     if (annotation.scope === 'element' || annotation.scope === 'region') {
-      const located = locateSource(project.path, annotation, { entry: project.entryFile });
+      // Command/attach projects serve generated pages: the URL is a route, not
+      // a file, so only a unique source match counts (sourceline honesty).
+      const generated = projects.runtimeFor(project).kind === 'command';
+      const located = project.attachOnly
+        ? { sourceFile: '', sourceLine: null }
+        : locateSource(project.path, annotation, { entry: project.entryFile, generated });
       const port = hosts.portFor(project.path);
       const patch = { ...located };
+      const tail = studioBrowsers.consoleTailFor(project.id);
+      if (tail) patch.consoleTail = tail;
       if (port) {
         const shots = await captureAnnotationShots(annotation, {
           port, shotsDir: reviews.shotsDir(project.id),
@@ -157,6 +204,11 @@ async function enrichAnnotation(project, annotation) {
         }
       }
       reviews.updateAnnotation(project.id, annotation.id, { context: patch });
+    } else {
+      // Page/site notes carry no element to shoot, but a console full of
+      // errors is still context an agent wants.
+      const tail = studioBrowsers.consoleTailFor(project.id);
+      if (tail) reviews.updateAnnotation(project.id, annotation.id, { context: { consoleTail: tail } });
     }
   } catch (err) {
     log.warn('annotation enrich failed', annotation.id, err.message);
@@ -415,7 +467,9 @@ function handle(channel, fn) {
       throw new Error('Refused: unexpected sender.');
     }
     try {
-      return await fn(payload || {});
+      // The event rides along for the few handlers that need to know which
+      // window is talking (Studio Browser chrome); most ignore it.
+      return await fn(payload || {}, event);
     } catch (err) {
       if (!err.canceled) log.error(`ipc ${channel}`, err);
       throw err;
@@ -512,6 +566,7 @@ function registerIpc() {
         autoStart: project.autoStart,
         liveReload: project.liveReload,
         autoSnapshot: project.autoSnapshot,
+        attachOnly: !!project.attachOnly,
         reviewActive: reviewManager.isActive(project.path),
         port: hosts.portFor(project.path),
         runtimeState: hosts.runtimeState(project.path),
@@ -547,8 +602,41 @@ function registerIpc() {
     // folder) — app bookkeeping, removed with the entry like the thumbnail.
     fs.promises.rm(path.join(app.getPath('userData'), 'versions', id), { recursive: true, force: true })
       .catch(() => {});
+    // Folderless attach projects own a placeholder dir in userData — ours to clean.
+    if (project.attachOnly) {
+      fs.promises.rm(path.join(app.getPath('userData'), 'attached', id), { recursive: true, force: true })
+        .catch(() => {});
+    }
     log.info('local project removed', project.path);
     return true;
+  });
+
+  // ---------- attach mode ----------
+  // Front a dev server the developer already runs. The target is a port on
+  // this machine and nothing else — parseAttachTarget refuses any other host,
+  // so attach can never become an open proxy.
+  handle('project:addAttach', async ({ target, folder, name }) => {
+    const port = runtimes.parseAttachTarget(target);
+    const project = projects.addAttach({
+      port,
+      folder: typeof folder === 'string' && folder.trim() ? folder.trim() : null,
+      name: typeof name === 'string' ? name.trim() : '',
+    });
+    log.info('attach project added', project.name, '->', port, project.attachOnly ? '(no folder)' : project.path);
+    if (!project.attachOnly) {
+      makeThumb(project.path, projects.thumbPath(project.id))
+        .then(made => { if (made) send('ui:refresh'); })
+        .catch(() => {});
+    }
+    return project;
+  });
+
+  handle('project:browseFolder', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Choose the project folder (optional — enables file:line mapping and snapshots)',
+      properties: ['openDirectory'],
+    });
+    return res.canceled ? null : res.filePaths[0];
   });
 
   // ---------- runtimes ----------
@@ -777,6 +865,64 @@ function registerIpc() {
   handle('review:stop', ({ dir }) => {
     assertManaged(dir, 'The site folder');
     return reviewManager.disable(dir);
+  });
+
+  // ---------- studio browser ----------
+  // Open the dedicated window for a project: host it (if it isn't), turn on
+  // review mode so the overlay rides along, and hand the URL to the window.
+  handle('studio:open', async ({ id }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    const runtime = projects.runtimeFor(project);
+    if (runtime.kind === 'command' && runtime.id !== 'attach' && runtimes.needsInstall(project.path, runtime)) {
+      throw new Error(`Dependencies aren't installed yet — run "${runtime.install}" from Runtime settings first.`);
+    }
+    const port = await hosts.start(project.path, project.port, {
+      liveReload: !!project.liveReload, runtime, name: project.name,
+    });
+    if (port !== project.port) projects.update(project.id, { port });
+    reviewManager.enable(project.path, project.id);
+    const url = `http://localhost:${port}/`;
+    studioBrowsers.open(project, url, { canPin: runtime.kind !== 'command' });
+    send('ui:refresh');
+    return { url, port };
+  });
+
+  // The chrome window's own channels. Each resolves the Studio Browser that
+  // the *sender* belongs to — a stranger window simply has none.
+  const sbFor = event => {
+    const browser = studioBrowsers.forSender(event.sender);
+    if (!browser) throw new Error('This window is not a Studio Browser.');
+    return browser;
+  };
+  handle('sb:hello', (payload, event) => sbFor(event).hello());
+  handle('sb:layout', (payload, event) => { sbFor(event).layout(payload); return true; });
+  handle('sb:nav', ({ action }, event) => {
+    if (!['back', 'forward', 'reload'].includes(action)) throw new Error('Unknown navigation action.');
+    sbFor(event).nav(action);
+    return true;
+  });
+  handle('sb:annotate', ({ on }, event) => sbFor(event).setAnnotating(!!on));
+  handle('sb:pin', async ({ versionId }, event) => { await sbFor(event).pin(versionId); return true; });
+  handle('sb:shot', async (payload, event) => {
+    const file = await sbFor(event).screenshot();
+    log.info('studio browser screenshot', file);
+    return { file };
+  });
+  handle('sb:revealShot', ({ file }, event) => {
+    sbFor(event); // only Studio Browser windows may ask
+    const manual = path.join(app.getPath('userData'), 'shots', 'manual');
+    const resolved = path.resolve(String(file || ''));
+    if (!resolved.startsWith(manual + path.sep)) throw new Error('That is not a screenshot of ours.');
+    shell.showItemInFolder(resolved);
+    return true;
+  });
+  handle('sb:consoleTail', (payload, event) => ({ entries: sbFor(event).buffer.slice() }));
+  handle('sb:copyAgent', (payload, event) => sbFor(event).copyForAgent());
+  handle('sb:copyText', ({ text }, event) => {
+    sbFor(event);
+    clipboard.writeText(String(text == null ? '' : text).slice(0, 10000));
+    return true;
   });
 
   handle('review:history', ({ id }) => {

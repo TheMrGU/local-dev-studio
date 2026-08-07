@@ -42,6 +42,8 @@
   <symbol id="i-export" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
   <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M9 22V12h6v10"/></symbol>
   <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 10 5-10 5L2 7l10-5Z"/><path d="m2 12 10 5 10-5M2 17l10 5 10-5"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5M9 8V2M15 8V2M6 8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></symbol>
 </svg>
 
 <!-- The window's own title bar. There is no OS frame and no menu strip behind
@@ -352,6 +354,35 @@
   </div>
 </div>
 
+<!-- Attach: front a dev server the developer already runs. Loopback only. -->
+<div id="attachModal" class="modal hidden">
+  <div class="modal-card">
+    <h3>Attach to a dev server</h3>
+    <p class="modal-hint">Your server keeps running in your own terminal. SiteSlurp connects to it and
+      fronts it on a stable port of its own — Review Mode, Studio Browser and sharing all work, and
+      nothing gets started, owned or killed.</p>
+    <label>Where is it listening?
+      <input id="attachTarget" type="text" spellcheck="false" placeholder="3000  ·  localhost:5173  ·  http://localhost:8080">
+      <span class="mini">This machine only — anything that isn't localhost is refused.</span>
+    </label>
+    <label>Project folder <span class="mini">(optional)</span>
+      <div class="row">
+        <input id="attachFolder" type="text" spellcheck="false" placeholder="none — annotations stay selector-only">
+        <button id="attachBrowse" class="small">Browse</button>
+      </div>
+      <span class="mini">With the folder, annotations can map back to file:line and snapshots cover the
+        source. Without it, the card simply fronts the port.</span>
+    </label>
+    <label>Name <span class="mini">(optional)</span>
+      <input id="attachName" type="text" spellcheck="false" placeholder="from the folder or the port">
+    </label>
+    <div class="modal-actions">
+      <button id="attachCancel" class="small">Cancel</button>
+      <button id="attachSave" class="primary small">Connect</button>
+    </div>
+  </div>
+</div>
+
 <!-- Snapshot prompt: one optional label, nothing else to decide. -->
 <div id="snapModal" class="modal hidden">
   <div class="modal-card">
@@ -423,7 +454,7 @@
     </label>
     <label id="rtPortRow">App port
       <input id="rtAppPort" type="number" min="0" max="65535" placeholder="auto">
-      <span class="mini">Only when the command binds a port of its own (docker, a hard-coded server).</span>
+      <span class="mini" id="rtPortHint">Only when the command binds a port of its own (docker, a hard-coded server).</span>
     </label>
     <div id="rtInstallRow" class="rt-install hidden">
       <span id="rtInstallText" class="mini"></span>
