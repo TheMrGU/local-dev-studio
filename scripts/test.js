@@ -22,12 +22,23 @@ require.cache[require.resolve('electron')] = {
       getPath: name => path.join(TMP, name),
       getVersion: () => '0.0.0-test',
     },
+    // Enough safeStorage for the secrets tests: reversible, clearly not the
+    // plaintext, and shaped like the real API (Buffers in, Buffers out).
+    safeStorage: {
+      isEncryptionAvailable: () => true,
+      encryptString: s => Buffer.from('enc!' + s, 'utf8'),
+      decryptString: b => {
+        const text = Buffer.from(b).toString('utf8');
+        if (!text.startsWith('enc!')) throw new Error('bad ciphertext');
+        return text.slice(4);
+      },
+    },
   },
 };
 
 const { scanPalette, applyColor, undoColor, listUndo, parseColor } = require('../lib/palette');
 const { extractSite, uniqueOutDir } = require('../lib/extract');
-const { zipFolder } = require('../lib/zip');
+const { zipFolder, zipFiles } = require('../lib/zip');
 const { makeHandler, HostManager } = require('../lib/server');
 const { makeProxyHandler, adjustCsp } = require('../lib/proxy');
 const { parsePublicUrl, viaTunnel } = require('../lib/tunnel');
@@ -50,6 +61,10 @@ const { exportReview, styleLine, renderAnnotation, renderReviewMd } = require('.
 const { ReviewManager } = require('../lib/review');
 const { locateSource } = require('../lib/sourceline');
 const { ControlServer } = require('../lib/control');
+const { GuestManager } = require('../lib/guest');
+const certs = require('../lib/certs');
+const secrets = require('../lib/secrets');
+const httpsMod = require('https');
 
 let passed = 0;
 const failures = [];
@@ -2630,6 +2645,317 @@ async function capturePowerTests() {
   });
 }
 
+/* ---------------- guest review over share links (Phase 5.1) ---------------- */
+async function guestReviewTests() {
+  console.log('\nguest review (share links)');
+
+  const site = scratch('guest-site');
+  fs.writeFileSync(path.join(site, 'index.html'),
+    '<html><body><h1 class="hero">Share me</h1></body></html>');
+  const project = projectsReg.addLocal(site);
+
+  const manager = new ReviewManager({
+    projects: projectsReg,
+    capturesRoot: () => scratch('guest-caps'),
+    exportReview,
+    overlayPath: path.join(ROOT, 'renderer', 'review-overlay.js'),
+  });
+  const enriched = [];
+  const guests = new GuestManager({
+    projects: projectsReg,
+    reviews: reviewsStore,
+    overlayScript: () => manager.overlayScript(),
+    latestVersionId: p => {
+      try { return (versions.listSnapshots(p)[0] || {}).id || null; } catch { return null; }
+    },
+    onSaved: (p, annotation) => enriched.push(annotation.id),
+    // Tight note cap so the flood test doesn't need thirty saves; the request
+    // bucket stays roomy so every other check breathes.
+    limits: { bucket: { capacity: 200, refillPerSec: 200 }, notes: { limit: 3, windowMs: 60000 } },
+  });
+  const hostMgr = new HostManager();
+  hostMgr.reviewRouter = dir => manager.forDir(dir);
+  hostMgr.guestRouter = dir => guests.forDir(dir);
+  hostMgr.versionsRouter = dir => {
+    const p = projectsReg.byPath(dir);
+    if (!p) return null;
+    return {
+      meta: id => versions.getSnapshot(p, id, { optional: true }),
+      fileAt: (id, rel) => versions.fileAt(p, id, rel),
+    };
+  };
+  const port = await hostMgr.start(site, 4770);
+
+  const request = (method, urlPath, body, headers = {}) => new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const req = http.request({
+      host: '127.0.0.1', port, path: urlPath, method,
+      headers: payload
+        ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload), ...headers }
+        : headers,
+    }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString();
+        let json = null;
+        try { json = JSON.parse(text); } catch { /* html page */ }
+        resolve({ status: res.statusCode, json, text, headers: res.headers });
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+  const edge = { 'cf-connecting-ip': '203.0.113.7' };
+
+  try {
+    await check('without a guest share, tunneled visitors stay fully locked out', async () => {
+      const state = await request('GET', '/__siteslurp__/review/state', null, edge);
+      eq(state.status, 404);
+      const page = await request('GET', '/', null, edge);
+      ok(!page.text.includes('review/client.js'), 'no overlay for plain visitors');
+    });
+
+    let token;
+    await check('the share URL trades ?review=<token> for a cookie, and only the real token', async () => {
+      token = guests.enable(site).token;
+      const good = await request('GET', `/?review=${token}`, null, edge);
+      eq(good.status, 302);
+      ok(good.headers['set-cookie'].some(c => c.startsWith(`__ss_guest=${token}`)), 'cookie set: '
+        + JSON.stringify(good.headers['set-cookie']));
+      const bad = await request('GET', `/?review=${'0'.repeat(32)}`, null, edge);
+      ok(bad.headers['set-cookie'].some(c => c.includes('Max-Age=0')), 'a wrong token clears instead');
+    });
+
+    const asGuest = extra => ({ ...edge, cookie: `__ss_guest=${token}`, ...extra });
+
+    await check('a guest gets the overlay and a stripped state', async () => {
+      const page = await request('GET', '/', null, asGuest());
+      ok(page.text.includes('review/client.js'), 'overlay injected for the guest');
+      const naked = await request('GET', '/', null, edge);
+      ok(!naked.text.includes('review/client.js'), 'cookie-less visitors still get none');
+      const script = await request('GET', '/__siteslurp__/review/client.js', null, asGuest());
+      eq(script.status, 200);
+      const state = await request('GET', '/__siteslurp__/review/state', null, asGuest());
+      eq(state.status, 200);
+      eq(state.json.guest, true);
+      eq(Object.keys(state.json.project), ['name'], 'project reveals its name and nothing else: ');
+      ok(Array.isArray(state.json.annotations), 'annotations ride along');
+    });
+
+    await check('a guest annotates with a name; the note lands enriched and authored', async () => {
+      const res = await request('POST', '/__siteslurp__/review/annotate', {
+        scope: 'element',
+        author: '  Sam the Client  ',
+        context: { selector: 'h1.hero', pageUrl: '/', outerHTML: '<h1>Share me</h1>' },
+        input: { severity: 'should-fix', why: 'The headline reads like a shrug.' },
+      }, asGuest());
+      eq(res.status, 200);
+      eq(res.json.annotation.author, 'Sam the Client');
+      ok(!('outerHTML' in res.json.annotation.context), 'the reply is stripped too');
+      const stored = reviewsStore.getAnnotation(project.id, res.json.annotation.id);
+      eq(stored.author, 'Sam the Client');
+      eq(stored.context.outerHTML, '<h1>Share me</h1>', 'the store keeps the full context: ');
+      eq(enriched, [stored.id], 'the enrichment hook fired: ');
+      // Local annotations stay "me" — authorship is a guest concept.
+      const mine = reviewsStore.addAnnotation(project.id, {
+        scope: 'global', context: {}, input: { why: 'A local note about everything.' },
+      });
+      eq(mine.author, 'me');
+    });
+
+    await check('every capability beyond state + annotate answers 403, not just hidden UI', async () => {
+      const target = reviewsStore.listAnnotations(project.id)[0];
+      for (const route of ['update', 'delete', 'resolve', 'export', 'export/reveal', 'done', 'audit', 'image']) {
+        const res = await request('POST', `/__siteslurp__/review/${route}`, { id: target.id }, asGuest());
+        eq(res.status, 403, `${route} refused: `);
+      }
+      const img = await request('GET', `/__siteslurp__/review/image/${target.id}`, null, asGuest());
+      eq(img.status, 403, 'stored images stay private: ');
+      const projectsRoute = await request('GET', '/__siteslurp__/review/projects', null, asGuest());
+      eq(projectsRoute.status, 403, 'the library listing stays private: ');
+    });
+
+    await check('the guest origin check accepts same-host https and refuses others', async () => {
+      const good = await request('GET', '/__siteslurp__/review/state', null,
+        asGuest({ origin: `http://127.0.0.1:${port}`, host: `127.0.0.1:${port}` }));
+      eq(good.status, 200);
+      const bad = await request('POST', '/__siteslurp__/review/annotate', {
+        scope: 'global', input: { why: 'Cross-origin mischief attempt.' },
+      }, asGuest({ origin: 'https://evil.example' }));
+      eq(bad.status, 403);
+    });
+
+    await check('the hourly note cap answers 429 with a sentence', async () => {
+      // The cap is 3 for this run and one note is already in.
+      for (let i = 0; i < 2; i++) {
+        const res = await request('POST', '/__siteslurp__/review/annotate', {
+          scope: 'global', author: 'Sam', input: { why: `Filler note number ${i} for the cap.` },
+        }, asGuest());
+        eq(res.status, 200, 'note within the cap saves: ');
+      }
+      const over = await request('POST', '/__siteslurp__/review/annotate', {
+        scope: 'global', author: 'Sam', input: { why: 'One more than the window allows.' },
+      }, asGuest());
+      eq(over.status, 429);
+      ok(/note limit/i.test(over.json.error), over.json.error);
+    });
+
+    await check('the request bucket rate limits tunneled review traffic per ip', async () => {
+      const tight = new GuestManager({
+        projects: projectsReg, reviews: reviewsStore,
+        overlayScript: () => manager.overlayScript(),
+        latestVersionId: () => null,
+        limits: { bucket: { capacity: 2, refillPerSec: 0.001 } },
+      });
+      hostMgr.guestRouter = dir => tight.forDir(dir);
+      const tightToken = tight.enable(site).token;
+      const cookie = { ...edge, cookie: `__ss_guest=${tightToken}` };
+      eq((await request('GET', '/__siteslurp__/review/state', null, cookie)).status, 200);
+      eq((await request('GET', '/__siteslurp__/review/state', null, cookie)).status, 200);
+      const limited = await request('GET', '/__siteslurp__/review/state', null, cookie);
+      eq(limited.status, 429);
+      ok(/rate limited/i.test(limited.json.error), limited.json.error);
+      hostMgr.guestRouter = dir => guests.forDir(dir);
+    });
+
+    let v1;
+    await check('a pinned share link sets both cookies in one redirect', async () => {
+      v1 = (await versions.createSnapshot(project, { label: 'shared state', source: 'manual' })).id;
+      guests.disable(site);
+      token = guests.enable(site, { version: v1 }).token;
+      const res = await request('GET', `/?v=${v1}&review=${token}`, null, edge);
+      eq(res.status, 302);
+      const cookies = res.headers['set-cookie'];
+      ok(cookies.some(c => c.startsWith(`__ss_version=${v1}`)), 'pin cookie: ' + JSON.stringify(cookies));
+      ok(cookies.some(c => c.startsWith(`__ss_guest=${token}`)), 'guest cookie');
+    });
+
+    await check('a pinned guest annotates while the pin is latest; the note remembers the version', async () => {
+      // A different guest (new ip): the earlier flood test spent this hour's
+      // note allowance for the first one.
+      const pinnedGuest = { 'cf-connecting-ip': '203.0.113.8', cookie: `__ss_guest=${token}; __ss_version=${v1}` };
+      const page = await request('GET', '/', null, pinnedGuest);
+      ok(page.text.includes('Viewing snapshot'), 'snapshot banner serves through the tunnel');
+      ok(page.text.includes('review/client.js'), 'overlay rides the pinned page');
+      const state = await request('GET', '/__siteslurp__/review/state', null, pinnedGuest);
+      eq(state.json.pinned, true);
+      eq(state.json.pinnedStale, false);
+      const res = await request('POST', '/__siteslurp__/review/annotate', {
+        scope: 'element', author: 'Sam',
+        context: { selector: 'h1.hero', pageUrl: '/' },
+        input: { severity: 'nitpick', why: 'Noted against the pinned snapshot.' },
+      }, pinnedGuest);
+      eq(res.status, 200);
+      const stored = reviewsStore.getAnnotation(project.id, res.json.annotation.id);
+      eq(stored.pinnedVersion, v1, 'the snapshot id is on the note: ');
+    });
+
+    await check('once the page moves on, the pinned guest gets a friendly refusal', async () => {
+      fs.writeFileSync(path.join(site, 'index.html'),
+        '<html><body><h1 class="hero">Share me v2</h1></body></html>');
+      await versions.createSnapshot(project, { label: 'moved on', source: 'manual' });
+      const pinnedGuest = { 'cf-connecting-ip': '203.0.113.8', cookie: `__ss_guest=${token}; __ss_version=${v1}` };
+      const state = await request('GET', '/__siteslurp__/review/state', null, pinnedGuest);
+      eq(state.json.pinnedStale, true, 'state warns first: ');
+      const res = await request('POST', '/__siteslurp__/review/annotate', {
+        scope: 'global', author: 'Sam', input: { why: 'Too late for this snapshot.' },
+      }, pinnedGuest);
+      eq(res.status, 409);
+      ok(/moved on/i.test(res.json.error), res.json.error);
+    });
+
+    await check('stopping the share kills the capability completely', async () => {
+      guests.disable(site);
+      const state = await request('GET', '/__siteslurp__/review/state', null, asGuest());
+      eq(state.status, 404);
+      const page = await request('GET', '/', null, asGuest());
+      ok(!page.text.includes('review/client.js'), 'no overlay either');
+    });
+
+    await check('REVIEW.md names guest authors and pinned versions', () => {
+      const authored = reviewsStore.listAnnotations(project.id).find(a => a.pinnedVersion);
+      const md = renderAnnotation(authored, () => null);
+      ok(md.includes('**By:** Sam (guest)'), 'author line: ' + md.split('\n')[1]);
+      ok(md.includes(`**Noted on snapshot:** ${v1}`), 'pinned version line');
+      const local = reviewsStore.listAnnotations(project.id).find(a => a.author === 'me');
+      ok(!renderAnnotation(local, () => null).includes('**By:**'), 'local notes stay unadorned');
+    });
+  } finally {
+    hostMgr.stopAll();
+  }
+}
+
+/* ---------------- local https + secrets + deploy zips (Phase 5.2 / 5.3) ---------------- */
+async function sharingPowerTests() {
+  console.log('\nlocal https & deploy plumbing');
+
+  await check('the https door serves the same handler with the minted certificate', async () => {
+    const dir = scratch('https-site');
+    fs.writeFileSync(path.join(dir, 'index.html'), '<h1>secure</h1>');
+    const material = certs.ensureLocalTls(path.join(TMP, 'tls-store'));
+    const hostMgr = new HostManager();
+    try {
+      const port = await hostMgr.start(dir, 4870, {
+        tls: { key: material.key, cert: material.cert, port: 9443 },
+      });
+      const httpsPort = hostMgr.httpsPortFor(dir);
+      ok(httpsPort, 'an https port was bound');
+      ok(httpsPort !== port, 'on its own port');
+      const body = await new Promise((resolve, reject) => {
+        httpsMod.get({
+          host: '127.0.0.1', port: httpsPort, ca: material.ca,
+          servername: 'my-site.slurp.localhost',
+        }, res => {
+          const chunks = [];
+          res.on('data', c => chunks.push(c));
+          res.on('end', () => resolve(Buffer.concat(chunks).toString()));
+        }).on('error', reject);
+      });
+      ok(body.includes('<h1>secure</h1>'), 'the site serves over tls');
+      const plain = await new Promise((resolve, reject) => {
+        http.get({ host: '127.0.0.1', port }, res => { res.resume(); resolve(res.statusCode); })
+          .on('error', reject);
+      });
+      eq(plain, 200, 'the http door still answers: ');
+    } finally {
+      hostMgr.stopAll();
+    }
+  });
+
+  await check('secrets round-trip through safeStorage and never sit in plaintext', () => {
+    secrets.set('deploy:netlify:token', 'nfp_secret_12345');
+    const onDisk = fs.readFileSync(path.join(TMP, 'userData', 'secrets.json'), 'utf8');
+    ok(!onDisk.includes('nfp_secret_12345'), 'plaintext is not in the file');
+    eq(secrets.get('deploy:netlify:token'), 'nfp_secret_12345');
+    eq(secrets.has('deploy:netlify:token'), true);
+    secrets.set('deploy:netlify:token', '');
+    eq(secrets.get('deploy:netlify:token'), null);
+    eq(secrets.has('deploy:netlify:token'), false);
+  });
+
+  await check('zipFiles archives an explicit manifest file set — how snapshots deploy', async () => {
+    const blobs = scratch('deploy-blobs');
+    fs.writeFileSync(path.join(blobs, 'blob1'), '<h1>from a snapshot</h1>');
+    fs.writeFileSync(path.join(blobs, 'blob2'), 'body{color:blue}');
+    const zipPath = path.join(TMP, 'deploy.zip');
+    const result = await zipFiles([
+      { name: 'index.html', file: path.join(blobs, 'blob1') },
+      { name: 'assets/site.css', file: path.join(blobs, 'blob2') },
+    ], zipPath);
+    eq(result.files, 2);
+    if (process.platform === 'win32') {
+      const dest = path.join(TMP, 'deploy-unzipped');
+      execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${dest}' -Force`], { windowsHide: true });
+      eq(fs.readFileSync(path.join(dest, 'index.html'), 'utf8'), '<h1>from a snapshot</h1>');
+      eq(fs.readFileSync(path.join(dest, 'assets', 'site.css'), 'utf8'), 'body{color:blue}');
+    }
+    await throws(() => zipFiles([], path.join(TMP, 'empty.zip')), 'an empty entry list refuses');
+  });
+}
+
 /* ---------------- run ---------------- */
 (async () => {
   console.log(`SiteSlurp checks  (scratch: ${TMP})`);
@@ -2655,6 +2981,8 @@ async function capturePowerTests() {
   await versionTests();
   await pinnedServingTests();
   await capturePowerTests();
+  await guestReviewTests();
+  await sharingPowerTests();
   await miscTests();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

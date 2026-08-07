@@ -68,10 +68,30 @@ inside the app and runs on Electron's own runtime.
    app. Visitors get the site and only the site: Review Mode, its API and live reload stay
    local-only, and dev servers behind the proxy see a localhost Host header so host checking
    (Vite 6+) doesn't reject tunneled requests.
-7. **Recolor** — scans the site's palette; click a swatch, pick a replacement, and it swaps
+
+   The share window adds two options on top of the plain link. **Guest review** lets the
+   people you share with annotate the page — they get the overlay in a locked-down guest
+   mode (notes signed with their name, everything else refused server-side by a per-share
+   capability token, rate-limited per visitor). **Pin a version** locks the link to a
+   snapshot so reviewers see a fixed state while you keep editing live; pinned guests can
+   annotate until a newer snapshot exists, and their notes remember which version they saw.
+   Guest notes land in the same review store as your own, marked with the author, so exports
+   and the MCP loop treat them like any other feedback.
+7. **Serve over HTTPS** — per-project toggle (⋯ menu) that adds a second, secure address at
+   `https://<name>.slurp.localhost:<port>` for secure-context APIs and realistic cookie
+   testing. Certificates come from a local CA the app writes itself with `node:crypto`
+   (nothing installed, no openssl); trust the CA once — the toast and the command palette
+   offer it — and every project's https address gets a clean padlock. `*.localhost` names
+   resolve to loopback in every modern browser, so there are no hosts-file edits.
+8. **Publish** — ⋯ → *Publish to the web…* uploads the site to Netlify (first adapter of a
+   pluggable set): the first publish creates the site, every later one updates the same
+   address, and you can publish the working tree or any snapshot — snapshots deploy
+   byte-for-byte from their manifests, so a deploy is reproducible. The access token lives
+   in the system keychain via Electron `safeStorage`, never in a plain file.
+9. **Recolor** — scans the site's palette; click a swatch, pick a replacement, and it swaps
    that color across every css, html and svg file. Alpha and notation are preserved
    (`rgba(…, .5)` stays `rgba`, `#abc` stays shorthand), and every recolor is undoable.
-8. **Extras** — homepage thumbnails, ZIP export, open in VS Code / Explorer, delete to the
+10. **Extras** — homepage thumbnails, ZIP export, open in VS Code / Explorer, delete to the
    Recycle Bin (optionally together with the raw snapshot it was extracted from). Each card
    shows the primary actions; everything else is under the **⋯** menu.
 

@@ -42,7 +42,7 @@ const { scanPalette, applyColor, undoColor, listUndo, parseColor, toHex } = requ
 const versions = require('./lib/versions');
 const { diffSegments } = require('./lib/diff');
 const { fixVideos } = require('./lib/videofix');
-const { zipFolder } = require('./lib/zip');
+const { zipFolder, zipFiles } = require('./lib/zip');
 const { listLibrary, describeLocal, invalidate } = require('./lib/library');
 const projects = require('./lib/projects');
 const reviews = require('./lib/reviews');
@@ -55,6 +55,11 @@ const { ControlServer } = require('./lib/control');
 // edition gate is a single check per feature.
 const verify = require('./lib/verify');
 const audits = require('./lib/audits');
+// [PRO] sharing power: guest review over share links, local https, deploy.
+const { GuestManager } = require('./lib/guest');
+const certs = require('./lib/certs');
+const { runDeploy, adapterFor } = require('./lib/deploy');
+const secrets = require('./lib/secrets');
 const { StudioBrowsers } = require('./lib/studioBrowser');
 const { captureAnnotationShots } = require('./lib/shots');
 const { locateSource } = require('./lib/sourceline');
@@ -143,6 +148,62 @@ const reviewManager = new ReviewManager({
   },
 });
 hosts.reviewRouter = dir => reviewManager.forDir(dir);
+// ---------- [PRO] guest review ----------
+// A share link's visitors are locked out of all review tooling (invariant 12)
+// unless the share was started with guest review on — then a per-share token
+// re-enables exactly state + annotate, checked server-side in lib/guest.js.
+const guests = new GuestManager({
+  projects,
+  reviews,
+  overlayScript: () => reviewManager.overlayScript(),
+  latestVersionId: project => {
+    try { return (versions.listSnapshots(project)[0] || {}).id || null; } catch { return null; }
+  },
+  // A guest note gets the same enrichment as a local one — screenshots and
+  // source mapping run here, against the locally hosted copy.
+  onSaved: (project, annotation) => {
+    enrichAnnotation(project, annotation);
+    send('ui:refresh');
+  },
+  log,
+});
+hosts.guestRouter = dir => guests.forDir(dir);
+
+// A share's link options (the version pin) live here; the guest token lives
+// in the guest manager. A pinned link without guest review needs no token at
+// all — ?v= is an ordinary pin cookie any visitor may hold.
+const shareLinks = new Map(); // dir -> { version }
+
+/** Sharing stops as one unit: the tunnel goes down, the guest token dies and
+ *  the link options are forgotten — a dead link is completely dead. */
+function stopShare(dir) {
+  guests.disable(dir);
+  shareLinks.delete(dir);
+  return tunnels.stop(dir);
+}
+function stopAllShares() {
+  guests.disableAll();
+  shareLinks.clear();
+  tunnels.stopAll();
+}
+
+/** What the UI needs to render a share: tunnel state plus, when guest review
+ *  or a version pin is on, the full link with its query parameters. */
+function shareStateFor(dir) {
+  const state = tunnels.state(dir);
+  if (!state) return null;
+  const guest = guests.stateFor(dir);
+  const link = shareLinks.get(dir) || {};
+  const params = [];
+  if (link.version) params.push('v=' + encodeURIComponent(link.version));
+  if (guest) params.push('review=' + guest.token);
+  return {
+    ...state,
+    guest: !!guest,
+    version: link.version || null,
+    shareUrl: state.url && params.length ? `${state.url}/?${params.join('&')}` : state.url,
+  };
+}
 // "/" serves the project's chosen entry page; the server falls back to its own
 // resolution when nothing is chosen or the chosen file is gone.
 hosts.entryFor = dir => {
@@ -232,7 +293,7 @@ const controlServer = new ControlServer({
     return { port, url: `http://localhost:${port}/` };
   },
   stopProject: project => {
-    tunnels.stop(project.path);
+    stopShare(project.path);
     reviewManager.disable(project.path);
     const stopped = hosts.stop(project.path);
     send('ui:refresh');
@@ -307,6 +368,31 @@ async function enrichAnnotation(project, annotation) {
   }
 }
 
+// ---------- [PRO] local https (5.2) ----------
+// One CA + one wildcard leaf covers every project: <slug>.slurp.localhost
+// resolves to loopback in modern browsers with no hosts-file edits. The
+// https listener is an *extra* door — every internal tool (thumbs, shots,
+// audits, the tunnel) keeps talking plain http to the ordinary port.
+const tlsDir = () => path.join(app.getPath('userData'), 'tls');
+
+function tlsFor(project) {
+  if (!project || !project.https) return null;
+  try {
+    const material = certs.ensureLocalTls(tlsDir());
+    return { key: material.key, cert: material.cert, port: project.httpsPort || 8443 };
+  } catch (err) {
+    log.warn('https material unavailable', err.message);
+    return null;
+  }
+}
+
+function httpsUrlFor(project) {
+  if (!project) return null;
+  const httpsPort = hosts.httpsPortFor(project.path);
+  if (!httpsPort) return null;
+  return `https://${certs.hostSlug(project.name)}.slurp.localhost:${httpsPort}/`;
+}
+
 /** Host a project on its registered port (sliding to a free one if squatted)
  *  and persist what it actually got. The one door review mode, Studio Browser
  *  and the control API all go through. */
@@ -316,7 +402,7 @@ async function ensureHosted(project) {
     throw new Error(`Dependencies aren't installed yet — run "${runtime.install}" from Runtime settings first.`);
   }
   const port = await hosts.start(project.path, project.port, {
-    liveReload: !!project.liveReload, runtime, name: project.name,
+    liveReload: !!project.liveReload, runtime, name: project.name, tls: tlsFor(project),
   });
   if (port !== project.port) projects.update(project.id, { port });
   return port;
@@ -937,6 +1023,9 @@ function registerIpc() {
           autoStart: project.autoStart,
           liveReload: project.liveReload,
           autoSnapshot: project.autoSnapshot,
+          https: !!project.https,
+          httpsUrl: httpsUrlFor(project),
+          deploy: project.deploy || null,
           reviewActive: reviewManager.isActive(site.dir),
         }
         : site;
@@ -951,6 +1040,9 @@ function registerIpc() {
         autoStart: project.autoStart,
         liveReload: project.liveReload,
         autoSnapshot: project.autoSnapshot,
+        https: !!project.https,
+        httpsUrl: httpsUrlFor(project),
+        deploy: project.deploy || null,
         attachOnly: !!project.attachOnly,
         reviewActive: reviewManager.isActive(project.path),
         port: hosts.portFor(project.path),
@@ -958,7 +1050,7 @@ function registerIpc() {
       });
     }
     sites.sort((a, b) => b.mtime - a.mtime);
-    return { ...list, sites: sites.map(s => ({ ...s, share: tunnels.state(s.dir) })) };
+    return { ...list, sites: sites.map(s => ({ ...s, share: shareStateFor(s.dir) })) };
   });
 
   handle('project:addLocal', async ({ path: dir }) => {
@@ -979,7 +1071,7 @@ function registerIpc() {
     if (project.kind !== 'local') {
       throw new Error('Captures are deleted from their card — this only removes local projects.');
     }
-    tunnels.stop(project.path);
+    stopShare(project.path);
     hosts.stop(project.path);
     projects.remove(id);
     fs.promises.rm(projects.thumbPath(id), { force: true }).catch(() => {});
@@ -1052,7 +1144,7 @@ function registerIpc() {
     // A running site is serving the old runtime — stop it so the next Host
     // click starts what was just chosen, rather than silently disagreeing.
     if (hosts.portFor(project.path)) {
-      tunnels.stop(project.path);
+      stopShare(project.path);
       reviewManager.disable(project.path);
       hosts.stop(project.path);
     }
@@ -1489,6 +1581,7 @@ function registerIpc() {
       liveReload: !!(project && project.liveReload),
       runtime,
       name: project ? project.name : path.basename(dir),
+      tls: tlsFor(project),
     });
     if (project) {
       // If an external process squatted the registered port, the host manager
@@ -1504,13 +1597,13 @@ function registerIpc() {
   });
 
   handle('host:stop', ({ dir }) => {
-    tunnels.stop(dir);
+    stopShare(dir);
     reviewManager.disable(dir);
     return hosts.stop(dir);
   });
   handle('host:stopAll', () => {
     for (const { dir } of hosts.list()) reviewManager.disable(dir);
-    tunnels.stopAll();
+    stopAllShares();
     hosts.stopAll();
     return true;
   });
@@ -1519,24 +1612,155 @@ function registerIpc() {
   // One switch: the hosted port goes online through a Cloudflare quick tunnel
   // and comes back as an https link. The link dies with the toggle, the host,
   // or the app — nothing outlives the session.
-  handle('share:start', async ({ dir }) => {
+  // [PRO] options: guestReview mints a capability token that lets visitors
+  // annotate (and only annotate); version pins the link to a snapshot so
+  // reviewers see a fixed state while work continues on live.
+  handle('share:start', async ({ dir, guestReview = false, version = null }) => {
     assertManaged(dir, 'The site folder');
     const port = hosts.portFor(dir);
     if (!port) throw new Error('Host the site first — sharing puts the hosted address online.');
-    const url = await tunnels.start(dir, port, {
+
+    const project = projects.byPath(dir);
+    if (guestReview && !project) {
+      throw new Error('Guest review needs a project in the library — this folder is only hosted.');
+    }
+    let pinned = null;
+    if (version) {
+      if (!project) throw new Error('Version-pinned links need a project in the library.');
+      if (projects.runtimeFor(project).kind === 'command') {
+        throw new Error('A dev-server project can\'t pin a version — its pages aren\'t a function of its files.');
+      }
+      pinned = versions.getSnapshot(project, String(version)).id;
+    }
+
+    await tunnels.start(dir, port, {
       onDownload: p => send('share:download', p),
     });
-    log.info('sharing', dir, url);
-    return { url };
+    // A fresh share means fresh options — and a fresh token, so links from an
+    // earlier share of this site stop being annotate-capable.
+    guests.disable(dir);
+    shareLinks.set(dir, { version: pinned });
+    if (guestReview) guests.enable(dir, { version: pinned });
+    const state = shareStateFor(dir);
+    log.info('sharing', dir, state.shareUrl, guestReview ? '(guest review)' : '', pinned ? `(pinned ${pinned})` : '');
+    return { url: state.shareUrl, guest: state.guest, version: state.version };
   });
 
   handle('share:stop', ({ dir }) => {
-    const stopped = tunnels.stop(dir);
+    const stopped = stopShare(dir);
     if (stopped) log.info('share stopped', dir);
     return stopped;
   });
 
-  handle('share:state', ({ dir }) => tunnels.state(dir));
+  handle('share:state', ({ dir }) => shareStateFor(dir));
+
+  // ---------- [PRO] local https (5.2) ----------
+  // The toggle allocates a stable https port, mints the local CA + wildcard
+  // certificate on first use, and re-hosts a running site so the new door
+  // opens immediately. The tunnel keeps pointing at the http port throughout.
+  handle('project:setHttps', async ({ id, https: wantHttps }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    projects.update(id, { https: !!wantHttps });
+    if (wantHttps) certs.ensureLocalTls(tlsDir()); // mint now so trusting can be offered now
+    if (hosts.portFor(project.path)) {
+      hosts.stop(project.path);
+      await ensureHosted(projects.byId(id));
+    }
+    const updated = projects.byId(id);
+    log.info('https', updated.https ? 'on' : 'off', project.path);
+    return { https: !!updated.https, httpsUrl: httpsUrlFor(updated), httpsPort: updated.httpsPort || null };
+  });
+
+  // Put the CA into the user's trust store where the OS lets us do it politely
+  // (Windows shows its own confirmation dialog); otherwise reveal the file
+  // with the doctor's instructions.
+  handle('https:trust', async () => {
+    const material = certs.ensureLocalTls(tlsDir());
+    const cleanedEnv = { ...process.env };
+    for (const key of ['ELECTRON_RUN_AS_NODE', 'ELECTRON_NO_ATTACH_CONSOLE', 'NODE_OPTIONS']) delete cleanedEnv[key];
+    const tryTool = (cmd, args) => new Promise(resolve => {
+      let child;
+      try {
+        child = spawn(cmd, args, { windowsHide: true, env: cleanedEnv, stdio: 'ignore' });
+      } catch { resolve(false); return; }
+      child.on('error', () => resolve(false));
+      child.on('exit', code => resolve(code === 0));
+    });
+    if (process.platform === 'win32'
+        && await tryTool('certutil', ['-user', '-addstore', 'Root', material.caPath])) {
+      log.info('local CA trusted (certutil)');
+      return { trusted: true };
+    }
+    if (process.platform === 'darwin'
+        && await tryTool('security', ['add-trusted-cert', '-k',
+          path.join(require('os').homedir(), 'Library', 'Keychains', 'login.keychain-db'), material.caPath])) {
+      log.info('local CA trusted (security)');
+      return { trusted: true };
+    }
+    shell.showItemInFolder(material.caPath);
+    return { trusted: false, caPath: material.caPath };
+  });
+
+  // ---------- [PRO] deploy (5.3) ----------
+  const deployTokenKey = provider => `deploy:${provider}:token`;
+
+  handle('deploy:token', ({ provider = 'netlify' } = {}) => ({ has: secrets.has(deployTokenKey(provider)) }));
+
+  handle('deploy:setToken', ({ provider = 'netlify', token }) => {
+    secrets.set(deployTokenKey(provider), String(token || '').trim());
+    return { has: secrets.has(deployTokenKey(provider)) };
+  });
+
+  handle('deploy:run', async ({ id, provider = 'netlify', version = null, unlink = false }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    if (unlink) {
+      projects.update(id, { deploy: null });
+      return { unlinked: true };
+    }
+    if (project.attachOnly) throw new Error('A folderless attach project has no files to publish.');
+    const runtime = projects.runtimeFor(project);
+    if (runtime.kind === 'command') {
+      throw new Error('Publishing uploads static files — build the project and add its build-output folder to the library, then publish that.');
+    }
+    adapterFor(provider); // unknown providers fail before any file work
+    const token = secrets.get(deployTokenKey(provider));
+    if (!token) throw new Error('Save an access token first — it goes in the Publish window and is stored in the system keychain.');
+
+    const progress = msg => send('deploy:progress', { id, msg });
+
+    // The archive: the working tree zips straight from disk; a snapshot zips
+    // from its manifest's blobs — any historical version deploys byte-exact.
+    const serveRoot = runtime.root ? path.join(project.path, runtime.root) : project.path;
+    const tmpZip = path.join(app.getPath('temp'), `siteslurp-deploy-${Date.now()}.zip`);
+    progress('Packing the files…');
+    let zipped;
+    if (version) {
+      const snap = versions.getSnapshot(project, String(version));
+      const prefix = runtime.root ? String(runtime.root).replace(/\\/g, '/').replace(/\/+$/, '') + '/' : '';
+      const entries = [];
+      for (const f of snap.files) {
+        if (prefix && !f.path.startsWith(prefix)) continue;
+        const at = versions.fileAt(project, snap.id, f.path);
+        if (at) entries.push({ name: f.path.slice(prefix.length), file: at.blobPath });
+      }
+      zipped = await zipFiles(entries, tmpZip);
+    } else {
+      zipped = await zipFolder(serveRoot, tmpZip);
+    }
+
+    try {
+      const linked = project.deploy && project.deploy.provider === provider ? project.deploy.siteId : null;
+      const result = await runDeploy({ provider, zipPath: tmpZip, token, siteId: linked, onProgress: progress });
+      projects.update(id, { deploy: { provider, siteId: result.siteId, url: result.url } });
+      log.info('deployed', project.name, provider, result.url);
+      send('ui:refresh');
+      return { url: result.url, siteId: result.siteId, files: zipped.files, bytes: zipped.bytes, version: version || null };
+    } finally {
+      fs.promises.rm(tmpZip, { force: true }).catch(() => {});
+    }
+  });
 
   handle('zip:export', async ({ dir }) => {
     assertInRoot(dir, 'The site folder');
@@ -1670,12 +1894,12 @@ function registerIpc() {
       ...(offerRaw ? { checkboxLabel: 'Also delete the raw snapshot it was extracted from', checkboxChecked: false } : {}),
     });
     if (response !== 0) return false;
-    tunnels.stop(dir);
+    stopShare(dir);
     hosts.stop(dir);
     await trashWithRetry(dir);
     log.info('deleted', dir);
     if (offerRaw && checkboxChecked) {
-      tunnels.stop(rawDir);
+      stopShare(rawDir);
       hosts.stop(rawDir);
       await trashWithRetry(rawDir);
       log.info('deleted', rawDir);
@@ -1966,7 +2190,7 @@ function runSelfTest() {
     }
     // app.exit skips before-quit, so anything the run started has to be taken
     // down here — a leaked dev server would outlive the app that spawned it.
-    tunnels.stopAll();
+    stopAllShares();
     hosts.stopAll();
     await sleep(600);
     if (failure) {
@@ -2051,7 +2275,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', () => {
     captureQueue.length = 0; // a quitting app must not start the next queued capture
     if (job) job.controller.abort();
-    tunnels.stopAll();
+    stopAllShares();
     hosts.stopAll();
     versions.autoUnwatchAll();
     // Takes control.json with it, so a stopped app can't be mistaken for a
@@ -2062,7 +2286,7 @@ if (!app.requestSingleInstanceLock()) {
   // dev server we started would keep running with nothing left to stop it.
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(signal, () => {
-      tunnels.stopAll();
+      stopAllShares();
       hosts.stopAll();
       controlServer.close();
       setTimeout(() => app.exit(0), 400);

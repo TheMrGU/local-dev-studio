@@ -26,7 +26,13 @@
     childTrail: [],        // elements left behind by ArrowUp, for ArrowDown
     lastSaved: null,       // {scope, context, input} of the last saved note
     pinCycle: -1,          // index for [ / ] pin cycling
+    guestName: '',         // who this guest says they are (share links only)
   };
+
+  // Guest mode: this page arrived over a share link whose token re-enables
+  // exactly state + annotate. Everything else is refused server-side; the UI
+  // hides what would only ever answer 403.
+  const isGuest = () => !!(state.config && state.config.guest);
 
   const api = {
     get: route => fetch(API + route).then(r => r.json()),
@@ -490,7 +496,7 @@
     const save = el('button', 'save', editing ? 'Save changes' : 'Save');
     save.addEventListener('click', () => submit({}));
     actions.appendChild(save);
-    if (scope === 'element' && !editing) {
+    if (scope === 'element' && !editing && !isGuest()) {
       const ref = el('button', 'ghost', '+ reference…');
       ref.title = 'Save, then point at an element on another site in the library';
       ref.addEventListener('click', () => submit({ reference: true }));
@@ -507,14 +513,21 @@
 
     function refreshSave() {
       const d = state.draft.input;
-      // A pinned snapshot view is read-only: notes describe the live version.
-      const pinnedView = !!(state.config && state.config.pinned);
+      // A pinned snapshot view is read-only for the reviewer (notes describe
+      // the live version). A pinned *guest* may annotate as long as the pin
+      // is still the newest snapshot — the server checks again at save time.
+      const pinnedView = isGuest()
+        ? !!(state.config && state.config.pinnedStale)
+        : !!(state.config && state.config.pinned);
       const blocked = d.rating !== null && d.why.trim().length < (state.config ? state.config.minWhy : 10);
       save.disabled = blocked || pinnedView;
-      save.title = pinnedView ? 'Annotations target the live version — use "Back to live" first.' : '';
+      save.title = pinnedView ? (isGuest() ? 'This page has moved on since this link was made.'
+        : 'Annotations target the live version — use "Back to live" first.') : '';
       err.style.display = (blocked || pinnedView) ? 'block' : 'none';
       err.textContent = pinnedView
-        ? 'Viewing a snapshot — annotations target the live version.'
+        ? (isGuest()
+          ? 'This page has moved on — the site changed since this snapshot link was made.'
+          : 'Viewing a snapshot — annotations target the live version.')
         : blocked ? 'A rating needs a reason — a number alone isn\'t actionable.' : '';
     }
     refreshSave();
@@ -532,10 +545,12 @@
         }
         const ticked = collectTicked();
         const typed = draft.input.why.trim() || draft.input.want.trim() || draft.input.rating !== null;
+        // Guests sign their notes; the server stores it as the author field.
+        const author = isGuest() && state.guestName ? { author: state.guestName } : {};
         let annotation = null;
         if (typed || !ticked.length) {
           ({ annotation } = await api.post('annotate', {
-            scope: draft.scope, context: draft.context, input: draft.input,
+            scope: draft.scope, context: draft.context, input: draft.input, ...author,
           }));
           draft.annotationId = annotation.id;
           state.lastSaved = { scope: draft.scope, context: draft.context, input: draft.input };
@@ -543,7 +558,7 @@
         for (const text of ticked) {
           await api.post('annotate', {
             scope: 'global', context: draft.context,
-            input: { severity: 'should-fix', why: text },
+            input: { severity: 'should-fix', why: text }, ...author,
           });
         }
         await refreshState();
@@ -750,12 +765,34 @@
     }
     if (annotation.input.why) pinPop.appendChild(el('p', 'pin-why', annotation.input.why));
     if (annotation.input.want) pinPop.appendChild(el('p', 'pin-want', '→ ' + annotation.input.want));
-    if (annotation.context.referenceImage) {
+    if (annotation.author && annotation.author !== 'me') {
+      pinPop.appendChild(el('p', 'pin-want', 'By ' + annotation.author));
+    }
+    if (annotation.context.referenceImage && !isGuest()) {
       const img = document.createElement('img');
       img.className = 'ref-img';
       img.alt = 'Reference image';
       img.src = API + 'image/' + encodeURIComponent(annotation.id);
       pinPop.appendChild(img);
+    }
+
+    // A guest reads a pin, nothing more — resolve, edit, delete and images are
+    // refused server-side, so the buttons would only ever apologize.
+    if (isGuest()) {
+      if (annotation.resolved) pinPop.appendChild(el('p', 'pin-res', 'Resolved'));
+      const actions = el('div', 'actions');
+      const close = el('button', 'ghost', 'Close');
+      close.addEventListener('click', closePinPop);
+      actions.appendChild(close);
+      pinPop.appendChild(actions);
+      const box = annotation.context.boundingBox;
+      const anchor = box
+        ? { x: box.x - window.scrollX, y: box.y - window.scrollY, w: box.w }
+        : { x: window.innerWidth / 2 - 165, y: 120, w: 0 };
+      pinPop.style.left = Math.max(10, Math.min(anchor.x + anchor.w + 14, window.innerWidth - 344)) + 'px';
+      pinPop.style.top = Math.max(10, Math.min(anchor.y, window.innerHeight - 380)) + 'px';
+      root.appendChild(pinPop);
+      return;
     }
 
     const actions = el('div', 'actions');
@@ -865,6 +902,7 @@
   /** After code changes, selectors may die. Flag those annotations as orphaned
    *  (never delete) and un-flag ones whose element came back. */
   async function reconcileOrphans() {
+    if (isGuest()) return; // guests can't update notes — and shouldn't re-flag them
     let changed = false;
     for (const annotation of annotationsForPage()) {
       if (annotation.scope !== 'element') continue;
@@ -936,6 +974,20 @@
     siteNote.title = 'A site-wide note — checklists live here too';
     siteNote.addEventListener('click', () => openPanel('global', captureContext([], null)));
     bar.appendChild(siteNote);
+
+    // Guest toolbar stops here (plus the count and the cheatsheet): the rest
+    // of the toolbelt belongs to the person at the keyboard.
+    if (isGuest()) {
+      bar.appendChild(el('span', 'sep'));
+      const count = el('span', 'count', countLabel());
+      count.id = 'ss-count';
+      bar.appendChild(count);
+      const cheat = el('button', '', '?');
+      cheat.title = 'Keyboard shortcuts';
+      cheat.addEventListener('click', toggleCheatsheet);
+      bar.appendChild(cheat);
+      return;
+    }
 
     const imgTool = el('button', imageTool.active ? 'on' : '', 'Overlay');
     imgTool.title = 'Lay a reference image over the page at adjustable opacity';
@@ -1137,6 +1189,7 @@
   }
 
   async function doExport() {
+    if (isGuest()) return; // export writes folders on the host machine
     try {
       const result = await api.post('export');
       toast(`Exported to ${result.folder}`, [
@@ -1318,6 +1371,49 @@
     return state.config;
   }
 
+  /* ---------- guest arrival ---------- */
+  // A guest signs their notes. The name is asked for once per browser and
+  // remembered locally; it travels with every annotate as the author field.
+  function promptGuestName() {
+    const modal = el('div', 'modal');
+    const card = el('div', 'modal-card');
+    card.appendChild(el('h3', '', 'You\'re reviewing as a guest'));
+    card.appendChild(el('p', 'pin-want',
+      'Click anything on the page to leave a note for the site\'s owner. Who should the notes say they\'re from?'));
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Your name';
+    input.maxLength = 60;
+    Object.assign(input.style, {
+      width: '100%', marginTop: '10px', padding: '8px 10px', borderRadius: '8px',
+      border: '1px solid rgba(255,255,255,0.14)', background: '#18181B', color: '#fff', fontSize: '13px',
+    });
+    card.appendChild(input);
+    const actions = el('div', 'actions');
+    const go = el('button', 'save', 'Start reviewing');
+    const done = () => {
+      state.guestName = input.value.trim().slice(0, 60);
+      try { localStorage.setItem('__ss_guest_name', state.guestName); } catch { /* storage may be off */ }
+      modal.remove();
+      showGuestBanner();
+    };
+    go.addEventListener('click', done);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') done(); });
+    actions.appendChild(go);
+    card.appendChild(actions);
+    modal.appendChild(card);
+    root.appendChild(modal);
+    input.focus();
+  }
+
+  function showGuestBanner() {
+    const existing = root.querySelector('.banner');
+    if (existing) existing.remove();
+    root.appendChild(el('div', 'banner',
+      'Reviewing as guest' + (state.guestName ? ' — ' + state.guestName : '')
+      + ' · your notes go to the site\'s owner'));
+  }
+
   async function boot() {
     try {
       await refreshState();
@@ -1327,6 +1423,11 @@
     buildBar();
     root.appendChild(bar);
     document.documentElement.appendChild(host);
+    if (isGuest()) {
+      try { state.guestName = localStorage.getItem('__ss_guest_name') || ''; } catch { /* storage may be off */ }
+      if (state.guestName) showGuestBanner();
+      else promptGuestName();
+    }
     if (state.config.pick) enterPickMode();
     await reconcileOrphans();
     renderPins();

@@ -552,6 +552,61 @@
   </div>
 </div>
 
+<!-- Share modal [PRO options on a LITE base]: the public link plus guest
+     review and a version pin. Basic one-click sharing stays free. -->
+<div id="shareModal" class="modal hidden">
+  <div class="modal-card">
+    <h3>Share <span id="shareName" class="mini"></span></h3>
+    <p class="modal-hint">Puts the hosted site online at a random https address through a secure
+      tunnel. The link works until sharing or hosting stops — nothing outlives the session.</p>
+    <label class="opt inline"><input type="checkbox" id="shareGuest"> Let visitors annotate (guest review)</label>
+    <span class="mini modal-hint">Guests leave notes on the page, signed with their name. Exports, resolving and
+      your files stay locked to this machine.</span>
+    <label id="shareVersionRow">Version reviewers see
+      <select id="shareVersion"></select>
+      <span class="mini">Pin the link to a snapshot and reviewers see that exact state while you keep
+        editing live. Pinned guests can annotate until a newer snapshot exists.</span>
+    </label>
+    <div id="shareCurrent" class="share-current hidden">
+      <span class="mini">Shared right now:</span>
+      <div class="row"><input id="shareLinkText" type="text" readonly spellcheck="false"><button id="shareCopy" class="small">Copy</button></div>
+    </div>
+    <div class="modal-actions">
+      <button id="shareStopBtn" class="small hidden">Stop sharing</button>
+      <button id="shareCancel" class="small">Cancel</button>
+      <button id="shareGo" class="primary small">Share</button>
+    </div>
+  </div>
+</div>
+
+<!-- Publish modal [PRO]: push the files to a real host (Netlify first). -->
+<div id="publishModal" class="modal hidden">
+  <div class="modal-card">
+    <h3>Publish <span id="pubName" class="mini"></span></h3>
+    <p class="modal-hint">Uploads the site's files to Netlify's CDN. The first publish creates the
+      site; every publish after that updates the same address.</p>
+    <label>Netlify access token <span id="pubTokenState" class="mini"></span>
+      <input id="pubToken" type="password" spellcheck="false" placeholder="paste a personal access token">
+      <span class="mini">From app.netlify.com → User settings → Applications → Personal access tokens.
+        Stored encrypted in your system keychain, never in a plain file.</span>
+    </label>
+    <label>What to publish
+      <select id="pubVersion"></select>
+      <span class="mini">The files as they are right now, or any snapshot — a snapshot publishes
+        byte-for-byte, so deploys are reproducible.</span>
+    </label>
+    <div id="pubLinked" class="share-current hidden">
+      <span class="mini" id="pubLinkedText"></span>
+      <button id="pubUnlink" class="link-btn">Publish to a new site instead&hellip;</button>
+    </div>
+    <div id="pubStatus" class="rt-status hidden"></div>
+    <div class="modal-actions">
+      <button id="pubCancel" class="small">Cancel</button>
+      <button id="pubGo" class="primary small">Publish</button>
+    </div>
+  </div>
+</div>
+
 <div id="aboutModal" class="modal hidden">
   <div class="modal-card about">
     <svg class="mark big" viewBox="0 0 32 32" aria-hidden="true">

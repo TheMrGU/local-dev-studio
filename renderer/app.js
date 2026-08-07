@@ -653,16 +653,76 @@ async function stopSite(dir) {
 }
 
 /* ---------- public sharing ---------- */
-// One click on the share toggle puts the hosted port online through a
-// Cloudflare quick tunnel and hands back an https link; the same click takes
-// it down. The link is random on purpose — shareable, not guessable.
-async function shareSite(site) {
+// The share modal: one switch for the tunnel itself (free, as shipped), plus
+// the Pro options — guest review (visitors can annotate, and only annotate)
+// and a version pin (reviewers see a snapshot while live keeps moving).
+const shareState = { site: null };
+
+async function openShare(site) {
+  shareState.site = site;
+  $('#shareName').textContent = '— ' + site.name;
+  $('#shareGuest').checked = !!(site.share && site.share.guest);
+
+  // A version pin only makes sense for a static project with snapshots.
+  const row = $('#shareVersionRow');
+  const pick = $('#shareVersion');
+  pick.innerHTML = '';
+  const live = document.createElement('option');
+  live.value = '';
+  live.textContent = 'Live — changes as you edit';
+  pick.appendChild(live);
+  const command = site.runtime && site.runtime.kind === 'command';
+  let hasVersions = false;
+  if (site.projectId && !command && !site.attachOnly) {
+    try {
+      const { snapshots } = await invoke('version:list', { id: site.projectId });
+      for (const snap of snapshots) {
+        const option = document.createElement('option');
+        option.value = snap.id;
+        option.textContent = `${snap.label || snap.source} · ${snap.id}`;
+        pick.appendChild(option);
+        hasVersions = true;
+      }
+    } catch { /* no snapshots is fine */ }
+  }
+  row.classList.toggle('hidden', command || !hasVersions);
+  if (site.share && site.share.version) pick.value = site.share.version;
+
+  const sharing = site.share && site.share.status === 'up';
+  $('#shareCurrent').classList.toggle('hidden', !sharing);
+  $('#shareStopBtn').classList.toggle('hidden', !sharing);
+  if (sharing) $('#shareLinkText').value = site.share.shareUrl || site.share.url;
+  $('#shareGo').textContent = sharing ? 'Update link' : 'Share';
+  $('#shareModal').classList.remove('hidden');
+}
+
+$('#shareCancel').addEventListener('click', () => $('#shareModal').classList.add('hidden'));
+$('#shareCopy').addEventListener('click', async () => {
+  await navigator.clipboard.writeText($('#shareLinkText').value);
+  toast('Share link copied', { kind: 'ok', timeout: 2500 });
+});
+$('#shareStopBtn').addEventListener('click', async () => {
+  const site = shareState.site;
+  $('#shareModal').classList.add('hidden');
+  if (site) await unshareSite(site);
+});
+$('#shareGo').addEventListener('click', async () => {
+  const site = shareState.site;
+  if (!site) return;
+  const button = $('#shareGo');
+  button.disabled = true;
+  $('#shareModal').classList.add('hidden');
   const pending = toast(`Creating a public link for "${site.name}"…`, { timeout: 0 });
   state.shareToast = pending.querySelector('span');
   try {
-    const { url } = await invoke('share:start', { dir: site.dir });
+    const guestReview = $('#shareGuest').checked;
+    const version = $('#shareVersion').value || null;
+    const { url } = await invoke('share:start', { dir: site.dir, guestReview, version });
     pending.remove();
-    toast(`${site.name} is public at ${url.replace('https://', '')} — the link works until sharing or hosting stops`, {
+    toast(`${site.name} is public at ${url.replace('https://', '').split('/?')[0]}`
+      + (guestReview ? ' — guests can annotate' : '')
+      + (version ? ' · pinned to a snapshot' : '')
+      + ' — the link works until sharing or hosting stops', {
       kind: 'ok', timeout: 15000,
       action: { label: 'Copy link', fn: () => navigator.clipboard.writeText(url) },
     });
@@ -671,14 +731,136 @@ async function shareSite(site) {
     failed(err);
   } finally {
     state.shareToast = null;
+    button.disabled = false;
   }
   await refreshLibrary();
-}
+});
 
 async function unshareSite(site) {
   await invoke('share:stop', { dir: site.dir }).catch(failed);
   toast('Public link taken down', { kind: 'ok', timeout: 3000 });
   await refreshLibrary();
+}
+
+/* ---------- publish (deploy) ---------- */
+// "Publish…" pushes the files to a real host — Netlify's ZIP API first. The
+// token lives in the system keychain; the renderer only ever learns "saved".
+const pubState = { site: null };
+
+async function openPublish(site) {
+  pubState.site = site;
+  $('#pubName').textContent = '— ' + site.name;
+  $('#pubToken').value = '';
+  $('#pubStatus').classList.add('hidden');
+  $('#pubStatus').textContent = '';
+
+  try {
+    const { has } = await invoke('deploy:token', { provider: 'netlify' });
+    $('#pubTokenState').textContent = has ? '(saved — paste to replace)' : '';
+  } catch { $('#pubTokenState').textContent = ''; }
+
+  const pick = $('#pubVersion');
+  pick.innerHTML = '';
+  const working = document.createElement('option');
+  working.value = '';
+  working.textContent = 'The files as they are right now';
+  pick.appendChild(working);
+  try {
+    const { snapshots } = await invoke('version:list', { id: site.projectId });
+    for (const snap of snapshots) {
+      const option = document.createElement('option');
+      option.value = snap.id;
+      option.textContent = `Snapshot · ${snap.label || snap.source} · ${snap.id}`;
+      pick.appendChild(option);
+    }
+  } catch { /* snapshots unavailable — working tree still publishes */ }
+
+  const linked = site.deploy && site.deploy.url;
+  $('#pubLinked').classList.toggle('hidden', !linked);
+  if (linked) $('#pubLinkedText').textContent = `Publishing updates ${site.deploy.url}`;
+
+  $('#publishModal').classList.remove('hidden');
+}
+
+$('#pubCancel').addEventListener('click', () => $('#publishModal').classList.add('hidden'));
+$('#pubUnlink').addEventListener('click', async () => {
+  const site = pubState.site;
+  if (!site) return;
+  await invoke('deploy:run', { id: site.projectId, unlink: true }).catch(failed);
+  $('#pubLinked').classList.add('hidden');
+  toast('Unlinked — the next publish creates a fresh site', { kind: 'ok', timeout: 4000 });
+  await refreshLibrary();
+});
+window.snap.on('deploy:progress', ({ msg }) => {
+  const status = $('#pubStatus');
+  status.classList.remove('hidden');
+  status.textContent = msg;
+});
+$('#pubGo').addEventListener('click', async () => {
+  const site = pubState.site;
+  if (!site) return;
+  const button = $('#pubGo');
+  button.disabled = true;
+  try {
+    const token = $('#pubToken').value.trim();
+    if (token) {
+      await invoke('deploy:setToken', { provider: 'netlify', token });
+      $('#pubToken').value = '';
+      $('#pubTokenState').textContent = '(saved — paste to replace)';
+    }
+    const version = $('#pubVersion').value || null;
+    const status = $('#pubStatus');
+    status.classList.remove('hidden');
+    status.textContent = 'Starting…';
+    const result = await invoke('deploy:run', { id: site.projectId, provider: 'netlify', version });
+    $('#publishModal').classList.add('hidden');
+    toast(`Published — ${result.url.replace('https://', '')} (${result.files} files)`, {
+      kind: 'ok', timeout: 15000,
+      action: { label: 'Open', fn: () => invoke('open:url', { url: result.url }).catch(failed) },
+    });
+    await refreshLibrary();
+  } catch (err) {
+    $('#pubStatus').classList.add('hidden');
+    failed(err);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+/* ---------- local https ---------- */
+// The https toggle: an extra, secure address for this project at
+// <name>.slurp.localhost. The certificate is minted locally; trusting the
+// local CA is a one-time step the toast offers right away.
+async function toggleHttps(site) {
+  try {
+    const result = await invoke('project:setHttps', { id: site.projectId, https: !site.https });
+    if (result.https) {
+      toast(result.httpsUrl
+        ? `HTTPS on — ${result.httpsUrl.replace('https://', '')}`
+        : 'HTTPS on — host the site to open the secure address', {
+        kind: 'ok', timeout: 12000,
+        action: { label: 'Trust certificate', fn: trustHttpsCa },
+      });
+    } else {
+      toast('HTTPS off for this project', { kind: 'ok', timeout: 3000 });
+    }
+    await refreshLibrary();
+  } catch (err) {
+    failed(err);
+  }
+}
+
+async function trustHttpsCa() {
+  try {
+    const { trusted } = await invoke('https:trust');
+    toast(trusted
+      ? 'The local certificate is trusted — the https address now shows a clean padlock'
+      : 'Could not add it automatically — the certificate file was revealed; import "ca.crt" into your system\'s trusted roots', {
+      kind: trusted ? 'ok' : '', timeout: 9000,
+    });
+  } catch (err) {
+    failed(err);
+  }
 }
 
 $('#btnStopAll').addEventListener('click', async () => {
@@ -994,9 +1176,25 @@ function renderCard(site) {
   }
   if (shared) {
     more.push({ icon: 'share', label: 'Copy public link', fn: async () => {
-      await navigator.clipboard.writeText(shared.url);
+      await navigator.clipboard.writeText(shared.shareUrl || shared.url);
       toast('Public link copied', { kind: 'ok', timeout: 2500 });
     } });
+  }
+  // An extra, secure address for this project — needed for APIs that demand a
+  // secure context and for realistic cookie testing.
+  if (site.projectId && !site.missing && !site.attachOnly) {
+    more.push({ icon: 'globe', label: site.https ? 'Serve over HTTPS: on' : 'Serve over HTTPS: off',
+      fn: () => toggleHttps(site) });
+    if (site.https && site.httpsUrl) {
+      more.push({ icon: 'open', label: 'Open the HTTPS address', fn: () =>
+        invoke('open:url', { url: site.httpsUrl }).catch(failed) });
+    }
+  }
+  // Push the files to a real host. Static file sets only — a dev-server
+  // project publishes its build output, not its source.
+  if (site.projectId && !site.missing && !site.attachOnly && !command) {
+    more.push({ icon: 'share', label: site.deploy ? 'Publish update to the web…' : 'Publish to the web…',
+      fn: () => openPublish(site) });
   }
   if (site.port && site.hasSitemap) {
     more.push({ icon: 'map', label: 'Open sitemap', fn: () =>
@@ -1085,9 +1283,9 @@ function renderCard(site) {
     actions.appendChild(iconBtn('open', 'Open in browser', () =>
       invoke('open:url', { url: `http://localhost:${site.port}/` })));
     const shareBtn = iconBtn('share', shared
-      ? 'Stop sharing — the public link stops working'
-      : 'Share publicly — creates an https link anyone can open', () =>
-      (shared ? unshareSite(site) : shareSite(site)));
+      ? 'Sharing is on — open the link options or stop sharing'
+      : 'Share publicly — an https link anyone can open, with optional guest annotation', () =>
+      openShare(site));
     if (shared) shareBtn.classList.add('sharing');
     actions.appendChild(shareBtn);
   } else if (!site.missing) {
@@ -2174,6 +2372,11 @@ function allCommands() {
       list.push({ group: 'sites', icon: 'open', label: `Open ${site.name} — localhost:${site.port}`,
         fn: () => invoke('open:url', { url: `http://localhost:${site.port}/` }).catch(failed) });
       list.push({ group: 'sites', icon: 'stop', label: `Stop ${site.name}`, fn: () => stopSite(site.dir) });
+      list.push({ group: 'sites', icon: 'share', label: `Share ${site.name} publicly…`, fn: () => openShare(site) });
+      if (site.https && site.httpsUrl) {
+        list.push({ group: 'sites', icon: 'open', label: `Open ${site.name} over HTTPS`,
+          fn: () => invoke('open:url', { url: site.httpsUrl }).catch(failed) });
+      }
       if (site.projectId && !site.attachOnly) {
         list.push({ group: 'sites', icon: 'layers', label: `Snapshot ${site.name}`,
           fn: () => openSnapshotPrompt(site) });
@@ -2187,6 +2390,13 @@ function allCommands() {
       if (!site.missing && !site.attachOnly) {
         list.push({ group: 'sites', icon: 'check', label: `Run audits on ${site.name}`,
           fn: () => runSiteAudits(site) });
+        list.push({ group: 'sites', icon: 'globe',
+          label: `Serve ${site.name} over HTTPS: ${site.https ? 'on' : 'off'}`,
+          fn: () => toggleHttps(site) });
+        if (!(site.runtime && site.runtime.kind === 'command')) {
+          list.push({ group: 'sites', icon: 'share', label: `Publish ${site.name} to the web…`,
+            fn: () => openPublish(site) });
+        }
       }
       if (site.kind === 'extracted' && site.sourceUrl && !site.missing) {
         list.push({ group: 'sites', icon: 'refresh', label: `Re-capture ${site.name} from the web`,
@@ -2203,6 +2413,8 @@ function allCommands() {
     { group: 'app', icon: 'gear', label: 'Settings', keys: 'Ctrl ,', fn: openSettings },
     { group: 'app', icon: 'plug', label: 'Agent access — connect Claude Code or Cursor', fn: openAgentAccess },
     { group: 'app', icon: 'check', label: 'Setup & diagnostics', fn: () => refreshEnv().then(() => openDoctor()) },
+    { group: 'app', icon: 'globe', label: 'Trust the local HTTPS certificate — one-time setup for https addresses',
+      fn: trustHttpsCa },
     { group: 'app', icon: 'star', label: 'Calibration — taste memory', fn: openCalibration },
     { group: 'app', icon: 'note', label: 'View log', fn: openLogViewer },
     { group: 'app', icon: 'note', label: 'Open log file', fn: () => invoke('open:log').catch(failed) },

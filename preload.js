@@ -26,6 +26,8 @@ const INVOKE = new Set([
   'extract:run',
   'host:start', 'host:stop', 'host:stopAll',
   'share:start', 'share:stop', 'share:state',
+  'project:setHttps', 'https:trust',
+  'deploy:token', 'deploy:setToken', 'deploy:run',
   'zip:export',
   'palette:scan', 'palette:apply', 'palette:undo',
   'video:fix', 'thumb:make',
@@ -37,7 +39,7 @@ const INVOKE = new Set([
 
 const EVENTS = new Set([
   'run:log', 'run:status', 'run:progress', 'run:done', 'run:busy', 'run:queue', 'runtime:state',
-  'share:state', 'share:download',
+  'share:state', 'share:download', 'deploy:progress',
   'zip:progress', 'env:changed', 'review:exported', 'review:promote',
   'ui:refresh', 'ui:settings', 'ui:focus-url',
   'ui:palette',
