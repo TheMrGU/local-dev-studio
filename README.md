@@ -68,6 +68,34 @@ inside the app and runs on Electron's own runtime.
    Recycle Bin (optionally together with the raw snapshot it was extracted from). Each card
    shows the primary actions; everything else is under the **⋯** menu.
 
+## The agent loop (MCP)
+
+This is the pitch: your on-page feedback becomes work an agent does, and SiteSlurp verifies it.
+
+1. Open a site in Review Mode and annotate what's wrong — every note carries the selector, the
+   `file:line` when known, computed styles, screenshots and your written reason.
+2. Connect your coding agent once: **Settings → Agent access** has a paste-ready line for
+   Claude Code (`claude mcp add siteslurp -- "<exe>" --mcp`) and a JSON snippet for Cursor or
+   any other MCP client. The app must be running; the MCP server is a thin stdio client of a
+   token-gated loopback control API (`userData/control.json`) — nothing is exposed off-machine.
+3. The agent calls `list_annotations`, reads `get_calibration` to learn your taste (standing
+   preferences + rating anchors), and fixes the code. The file watcher auto-snapshots the
+   project as edits land, so every state is restorable.
+4. The agent calls `resolve_annotation(id, note, afterRating)` — and SiteSlurp closes the loop
+   visually: the element is re-screenshotted and pixel-diffed against the original. Pins show
+   before/after pairs; a resolve that changed nothing visually gets flagged for reopening; an
+   element that drifted since you noted it comes up badged "changed since noted".
+
+Tools: `list_projects`, `list_annotations`, `get_annotation`, `resolve_annotation`,
+`get_calibration`, `create_snapshot`, `export_review`. Resources: each project's live
+`REVIEW.md` plus `calibration.md`. Prefer files over a live connection? **Export** writes the
+same thing as a folder.
+
+**Run audits** (review toolbar, card ⋯ menu, or Ctrl+K) adds an automated pass: an
+axe-core accessibility scan and an internal broken-link crawl, filed as `[auto]`-badged
+annotations in the same review — same severity scale, same export, clearly separated from
+your own judgment.
+
 ## Library
 
 The library lists every capture folder under the captures root — `Documents\SiteSlurp` by

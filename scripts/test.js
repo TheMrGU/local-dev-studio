@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'siteslurp-test-'));
@@ -44,9 +44,10 @@ const { describeLocal } = require('../lib/library');
 const { LiveReload } = require('../lib/livereload');
 const reviewsStore = require('../lib/reviews');
 const calibrationStore = require('../lib/calibration');
-const { exportReview, styleLine, renderAnnotation } = require('../lib/reviewExport');
+const { exportReview, styleLine, renderAnnotation, renderReviewMd } = require('../lib/reviewExport');
 const { ReviewManager } = require('../lib/review');
 const { locateSource } = require('../lib/sourceline');
+const { ControlServer } = require('../lib/control');
 
 let passed = 0;
 const failures = [];
@@ -1135,12 +1136,15 @@ async function reviewApiTests() {
   const project = projectsReg.addLocal(site);
 
   const anchored = [];
+  const resolvedHook = [];
   const manager = new ReviewManager({
     projects: projectsReg,
     capturesRoot: () => scratch('rev-api-caps'),
     exportReview,
     overlayPath: path.join(ROOT, 'renderer', 'review-overlay.js'),
     onAnchor: (proj, annotation) => anchored.push(annotation.id),
+    onResolved: (proj, annotation) => resolvedHook.push(annotation.id),
+    onAudit: async () => ({ pages: 1, axeViolations: 0, brokenLinks: 0, added: 0, skipped: 0 }),
   });
   const hostMgr = new HostManager();
   hostMgr.reviewRouter = dir => manager.forDir(dir);
@@ -1265,6 +1269,32 @@ async function reviewApiTests() {
       eq(res.json.annotation.resolvedRating, 8);
       eq(res.json.annotation.input.rating, 4, 'original rating kept for the diff: ');
       eq(anchored, [target.id], 'onAnchor fired: ');
+      eq(resolvedHook, [target.id], 'onResolved (the verification hook) fired: ');
+    });
+
+    await check('before/after shots serve through the image kinds route', async () => {
+      const state = await request('GET', '/__siteslurp__/review/state');
+      const target = state.json.annotations[0];
+      const shotsDir = path.join(TMP, 'userData', 'reviews', project.id, 'shots');
+      const px = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+      fs.writeFileSync(path.join(shotsDir, `${target.id}_after_el.png`), px);
+      reviewsStore.updateAnnotation(project.id, target.id, {
+        context: { screenshotAfterElement: `shots/${target.id}_after_el.png` },
+        diffScore: 3, // clamped to 1 on the way in
+      });
+      const img = await request('GET', `/__siteslurp__/review/image/${target.id}/after_el`);
+      eq(img.status, 200, 'after shot serves: ');
+      const bogus = await request('GET', `/__siteslurp__/review/image/${target.id}/passwd`);
+      eq(bogus.status, 404, 'unknown kinds refused: ');
+      const fresh = await request('GET', '/__siteslurp__/review/state');
+      eq(fresh.json.annotations[0].diffScore, 1, 'diffScore clamped and visible to the overlay: ');
+    });
+
+    await check('the audit route lands on the main-process hook', async () => {
+      const res = await request('POST', '/__siteslurp__/review/audit');
+      eq(res.status, 200);
+      eq(res.json.pages, 1, 'the hook\'s summary comes back: ');
     });
 
     await check('done turns the api off; the page serves clean again', async () => {
@@ -2127,6 +2157,304 @@ async function sharingTests() {
   });
 }
 
+/* ---------------- verification loop & audit annotations ---------------- */
+async function verifyLoopTests() {
+  console.log('\nverification loop');
+
+  await check('resolve metadata survives the store: note, score clamp, stale flag', () => {
+    const id = 'prj_verify_store';
+    const a = reviewsStore.addAnnotation(id, {
+      scope: 'element',
+      context: { selector: '.hero', pageUrl: '/' },
+      input: { severity: 'should-fix', why: 'Too small to read comfortably.' },
+    });
+    reviewsStore.updateAnnotation(id, a.id, {
+      resolved: true, resolvedNote: 'Bumped to 18px', diffScore: -2, stale: true,
+    });
+    const stored = reviewsStore.getAnnotation(id, a.id);
+    eq(stored.resolvedNote, 'Bumped to 18px');
+    eq(stored.diffScore, 0, 'negative scores clamp to 0: ');
+    eq(stored.stale, true);
+    reviewsStore.updateAnnotation(id, a.id, { diffScore: 0.42, stale: false });
+    eq(reviewsStore.getAnnotation(id, a.id).diffScore, 0.42);
+    eq(reviewsStore.getAnnotation(id, a.id).stale, false);
+  });
+
+  await check('audit annotations carry the auto flag; user ones never do', () => {
+    const id = 'prj_verify_auto';
+    const auto = reviewsStore.addAnnotation(id, {
+      scope: 'element',
+      context: { selector: 'img.logo', pageUrl: '/' },
+      input: { severity: 'blocking', why: 'Image has no alternative text at all.' },
+      auto: true,
+    });
+    const mine = reviewsStore.addAnnotation(id, {
+      scope: 'element',
+      context: { selector: '.hero', pageUrl: '/' },
+      input: { severity: 'nitpick', why: 'Feels slightly cramped up top.' },
+    });
+    eq(reviewsStore.getAnnotation(id, auto.id).auto, true);
+    eq(reviewsStore.getAnnotation(id, mine.id).auto, undefined);
+  });
+
+  await check('REVIEW.md badges [auto], pairs before/after, and lists resolves', () => {
+    const project = { id: 'p', name: 'Verify', kind: 'local', path: '/x' };
+    const review = { id: 'rev_20260807_01', startedAt: new Date().toISOString(), exportedAt: null };
+    const open = {
+      id: 'ann_a', reviewId: review.id, scope: 'element', resolved: false, auto: true,
+      context: { selector: 'img.logo', pageUrl: '/', computedStyles: {}, consoleTail: [] },
+      input: { rating: null, severity: 'blocking', axes: [], why: 'Image has no alt text.', want: '' },
+    };
+    const fixed = {
+      id: 'ann_b', reviewId: review.id, scope: 'element', resolved: true,
+      resolvedRating: 8, resolvedNote: 'Rebuilt the header grid', diffScore: 0.37,
+      context: {
+        selector: '.hero', pageUrl: '/', computedStyles: {}, consoleTail: [],
+        screenshotElement: 'shots/ann_b_el.png', screenshotAfterElement: 'shots/ann_b_after_el.png',
+      },
+      input: { rating: 3, severity: 'should-fix', axes: [], why: 'Cramped.', want: 'Air.' },
+    };
+    const unmoved = { ...fixed, id: 'ann_c', diffScore: 0, resolvedNote: '', context: { ...fixed.context } };
+    const md = renderReviewMd(project, review, [open, fixed, unmoved], () => null);
+    ok(md.includes('[BLOCKING] [auto] img.logo'), 'auto badge in the heading: ' + md.split('\n').find(l => l.includes('BLOCKING')));
+    ok(md.includes('## Resolved this review'), 'resolved section exists');
+    ok(md.includes('before shots/ann_b_el.png → after shots/ann_b_after_el.png'), 'before/after pair listed');
+    ok(md.includes('37% of pixels changed'), 'diff score rendered');
+    ok(md.includes('verified: nothing changed visually'), 'the zero-diff resolve is called out');
+    ok(md.includes("fixer's note: Rebuilt the header grid"), 'resolve note rendered');
+
+    const block = renderAnnotation(fixed, () => null);
+    ok(block.includes('**After (on resolve):** shots/ann_b_after_el.png'), 'after line in the annotation block');
+  });
+}
+
+/* ---------------- control api & mcp ---------------- */
+async function agentTests() {
+  console.log('\ncontrol api & mcp');
+
+  // A real project with a real annotation — the control API is a thin wrapper
+  // over the same modules the app uses, so the test drives those.
+  const site = scratch('agent-site');
+  fs.writeFileSync(path.join(site, 'index.html'), '<h1>Agent me</h1>');
+  const project = projectsReg.addLocal(site);
+  const annotation = reviewsStore.addAnnotation(project.id, {
+    scope: 'element',
+    context: { selector: 'h1', pageUrl: '/' },
+    input: { rating: 4, severity: 'should-fix', why: 'Headline carries no weight.', want: 'Bolder.' },
+  });
+
+  const hosted = [];
+  const verified = [];
+  const controlFile = path.join(TMP, 'userData', 'control.json');
+  const control = new ControlServer({
+    file: controlFile,
+    version: '0.0.0-test',
+    log: { info: () => {}, warn: () => {} },
+    projects: projectsReg,
+    reviews: reviewsStore,
+    calibration: calibrationStore,
+    versions,
+    hostedPort: () => null,
+    hostProject: async p => { hosted.push(p.id); return { port: 4999, url: 'http://localhost:4999/' }; },
+    stopProject: p => { hosted.push('stop:' + p.id); return true; },
+    exportProject: p => exportReview({ project: p, capturesRoot: scratch('agent-caps') }),
+    resolveAnnotation: async (p, a, { note, afterRating } = {}) => {
+      verified.push(a.id);
+      return reviewsStore.updateAnnotation(p.id, a.id, {
+        resolved: true,
+        ...(afterRating ? { resolvedRating: afterRating } : {}),
+        ...(note ? { resolvedNote: note } : {}),
+      });
+    },
+    reviewMarkdown: p => {
+      const all = reviewsStore.listReviews(p.id);
+      const review = all.find(r => !r.exportedAt) || all[all.length - 1];
+      return renderReviewMd(p, review, reviewsStore.listAnnotations(p.id, { reviewId: review.id }), () => null);
+    },
+  });
+  await control.start();
+  const { port, token } = JSON.parse(fs.readFileSync(controlFile, 'utf8'));
+
+  const call = (method, urlPath, body, useToken = true) => new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const req = http.request({
+      host: '127.0.0.1', port, path: urlPath, method,
+      headers: {
+        ...(useToken ? { Authorization: `Bearer ${token}` } : {}),
+        ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
+      },
+    }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(Buffer.concat(chunks).toString() || '{}') }));
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+
+  try {
+    await check('control.json holds a live port and a token the server enforces', async () => {
+      ok(Number.isInteger(port) && port > 0, 'random port recorded');
+      ok(/^[0-9a-f]{48}$/.test(token), 'token shape');
+      eq((await call('GET', '/v1/projects', null, false)).status, 401, 'no token, no answer: ');
+      eq((await call('GET', '/v1/ping')).status, 200);
+    });
+
+    await check('projects list includes the registered project with open counts', async () => {
+      const res = await call('GET', '/v1/projects');
+      const mine = res.json.projects.find(p => p.id === project.id);
+      ok(mine, 'project listed');
+      eq(mine.hosted, false);
+      eq(mine.openAnnotations, 1);
+    });
+
+    await check('annotations filter by status and resolve by name or id', async () => {
+      const open = await call('GET', `/v1/annotations?project=${project.id}&status=open`);
+      eq(open.json.annotations.length, 1);
+      const byName = await call('GET', `/v1/annotations?project=${encodeURIComponent(project.name)}&status=resolved`);
+      eq(byName.json.annotations.length, 0);
+      const one = await call('GET', `/v1/annotations/${annotation.id}`);
+      eq(one.json.annotation.id, annotation.id);
+      eq(one.json.project.id, project.id, 'owner found across stores: ');
+      eq((await call('GET', '/v1/annotations?project=no-such-thing')).status, 400, 'unknown project is a sentence: ');
+    });
+
+    await check('resolve goes through the injected hook exactly once', async () => {
+      const res = await call('POST', `/v1/annotations/${annotation.id}/resolve`, {
+        note: 'Made it 700 weight', afterRating: 8,
+      });
+      eq(res.status, 200);
+      eq(res.json.annotation.resolved, true);
+      eq(res.json.annotation.resolvedRating, 8);
+      eq(res.json.annotation.resolvedNote, 'Made it 700 weight');
+      eq(verified, [annotation.id], 'verification hook fired: ');
+      eq((await call('POST', `/v1/annotations/${annotation.id}/resolve`, {})).status, 400, 'double resolve refused: ');
+    });
+
+    await check('calibration reads and appends through the same store', async () => {
+      const before = await call('GET', '/v1/calibration');
+      ok(typeof before.json.markdown === 'string', 'markdown rendered');
+      const added = await call('POST', '/v1/calibration', { text: 'Never use pure black backgrounds.' });
+      eq(added.json.added, true);
+      const after = await call('GET', '/v1/calibration');
+      ok(after.json.markdown.includes('Never use pure black backgrounds.'), 'preference landed');
+    });
+
+    await check('snapshots create and list against the real engine', async () => {
+      const made = await call('POST', '/v1/snapshots', { project: project.id, label: 'from mcp' });
+      eq(made.status, 200);
+      ok(made.json.id, 'snapshot id');
+      const list = await call('GET', `/v1/snapshots?project=${project.id}`);
+      eq(list.json.snapshots[0].label, 'from mcp');
+    });
+
+    await check('host/stop and export round-trip; review markdown renders live', async () => {
+      const h = await call('POST', '/v1/host', { project: project.id });
+      eq(h.json.port, 4999);
+      await call('POST', '/v1/stop', { project: project.id });
+      eq(hosted, [project.id, 'stop:' + project.id], 'thin closures called: ');
+      const exp = await call('POST', '/v1/export', { project: project.id });
+      ok(fs.existsSync(path.join(exp.json.folder, 'REVIEW.md')), 'export wrote the folder');
+      const md = await call('GET', `/v1/review?project=${project.id}`);
+      ok(md.json.markdown.includes('## Resolved this review'), 'live REVIEW.md shows the resolve');
+    });
+
+    /* ---- the MCP stdio server against this control API ---- */
+    const mcpDir = scratch('agent-mcp-userdata');
+    fs.copyFileSync(controlFile, path.join(mcpDir, 'control.json'));
+
+    const session = env => {
+      const child = spawn(process.execPath, [path.join(ROOT, 'mcp', 'server.js')], {
+        env: { ...process.env, SLURP_VERSION: '9.9.9-test', ...env },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      let buffer = '';
+      const waiting = [];
+      child.stdout.on('data', chunk => {
+        buffer += chunk;
+        let at;
+        while ((at = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, at).trim();
+          buffer = buffer.slice(at + 1);
+          if (!line) continue;
+          const next = waiting.shift();
+          if (next) { clearTimeout(next.timer); next.resolve(JSON.parse(line)); }
+        }
+      });
+      let seq = 0;
+      return {
+        call: (method, params) => new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('mcp timed out on ' + method)), 8000);
+          waiting.push({ resolve, timer });
+          child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: ++seq, method, params }) + '\n');
+        }),
+        notify: method => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method }) + '\n'),
+        kill: () => child.kill(),
+      };
+    };
+
+    await check('mcp handshake, tools and a live round-trip through the control api', async () => {
+      const mcp = session({ SLURP_USERDATA: mcpDir });
+      try {
+        const init = await mcp.call('initialize', { protocolVersion: '2025-06-18', capabilities: {} });
+        eq(init.result.serverInfo.name, 'siteslurp');
+        eq(init.result.serverInfo.version, '9.9.9-test');
+        mcp.notify('notifications/initialized');
+        const tools = await mcp.call('tools/list', {});
+        eq(tools.result.tools.map(t => t.name), [
+          'list_projects', 'list_annotations', 'get_annotation', 'resolve_annotation',
+          'get_calibration', 'create_snapshot', 'export_review',
+        ], 'the seven tools: ');
+        const listed = await mcp.call('tools/call', { name: 'list_projects', arguments: {} });
+        ok(!listed.result.isError, 'call succeeded');
+        ok(listed.result.content[0].text.includes(project.name), 'project name in the payload');
+        const resources = await mcp.call('resources/list', {});
+        ok(resources.result.resources.some(r => r.uri === 'siteslurp://calibration.md'), 'calibration resource');
+        ok(resources.result.resources.some(r => r.uri.endsWith(`${project.id}/REVIEW.md`)), 'per-project review resource');
+        const review = await mcp.call('resources/read', { uri: `siteslurp://projects/${project.id}/REVIEW.md` });
+        ok(review.result.contents[0].text.includes('Resolved this review'), 'resource text is the live REVIEW.md');
+        const unknown = await mcp.call('no/such/method', {});
+        eq(unknown.error.code, -32601, 'unknown methods answer -32601: ');
+      } finally {
+        mcp.kill();
+      }
+    });
+
+    await check('a dead or missing control.json is one clear sentence', async () => {
+      const emptyDir = scratch('agent-mcp-empty');
+      const missing = session({ SLURP_USERDATA: emptyDir });
+      try {
+        const res = await missing.call('tools/call', { name: 'list_projects', arguments: {} });
+        eq(res.result.isError, true);
+        ok(res.result.content[0].text.includes('isn\'t running'), 'the sentence: ' + res.result.content[0].text);
+      } finally {
+        missing.kill();
+      }
+      // Stale file: the port answers nothing because the app is gone.
+      const staleDir = scratch('agent-mcp-stale');
+      fs.writeFileSync(path.join(staleDir, 'control.json'),
+        JSON.stringify({ port: 1, token: 'dead' }));
+      const stale = session({ SLURP_USERDATA: staleDir });
+      try {
+        const res = await stale.call('tools/call', { name: 'list_projects', arguments: {} });
+        eq(res.result.isError, true);
+        ok(res.result.content[0].text.includes('isn\'t running'), 'stale reads as not running');
+      } finally {
+        stale.kill();
+      }
+    });
+
+    await check('closing the control server removes control.json', () => {
+      control.close();
+      ok(!fs.existsSync(controlFile), 'file gone with the server');
+    });
+  } finally {
+    control.close();
+    projectsReg.remove(project.id);
+  }
+}
+
 /* ---------------- run ---------------- */
 (async () => {
   console.log(`SiteSlurp checks  (scratch: ${TMP})`);
@@ -2147,6 +2475,8 @@ async function sharingTests() {
   await reviewExportTests();
   await resolveLoopTests();
   await reviewApiTests();
+  await verifyLoopTests();
+  await agentTests();
   await versionTests();
   await pinnedServingTests();
   await miscTests();

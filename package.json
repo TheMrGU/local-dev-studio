@@ -41,7 +41,9 @@
       "main.js",
       "preload.js",
       "lib/**/*",
+      "mcp/**/*",
       "renderer/**/*",
+      "vendor/**/*",
       "!**/*.map"
     ],
     "extraResources": [
@@ -51,7 +53,8 @@
     "asarUnpack": [
       "node_modules/single-file-cli/**",
       "node_modules/simple-cdp/**",
-      "node_modules/ws/**"
+      "node_modules/ws/**",
+      "mcp/**"
     ],
     "win": {
       "target": [

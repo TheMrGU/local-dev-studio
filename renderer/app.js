@@ -209,7 +209,32 @@ async function openSettings() {
   }
   pick.value = settings.browserPath || (options[0] ? options[0].path : '');
   $('#setBrowserPath').textContent = pick.value;
+
+  // Agent access: paste-ready MCP configs built from how this very binary is
+  // launched. The exe path differs per machine, so they're composed here.
+  if (env.agent) {
+    const quoted = /\s/.test(env.agent.exe) ? `"${env.agent.exe}"` : env.agent.exe;
+    $('#agentClaude').value = `claude mcp add siteslurp -- ${quoted} ${env.agent.args.join(' ')}`;
+    $('#agentCursor').value = JSON.stringify({
+      mcpServers: { siteslurp: { command: env.agent.exe, args: env.agent.args } },
+    });
+  }
   $('#settingsModal').classList.remove('hidden');
+}
+
+/** The palette's "Agent access" lands on Settings with that section open. */
+async function openAgentAccess() {
+  await openSettings();
+  const block = $('#agentAccess');
+  block.open = true;
+  block.scrollIntoView({ block: 'nearest' });
+}
+
+for (const [btn, input] of [['#agentClaudeCopy', '#agentClaude'], ['#agentCursorCopy', '#agentCursor']]) {
+  $(btn).addEventListener('click', async () => {
+    await navigator.clipboard.writeText($(input).value);
+    toast('Copied — paste it in a terminal or your MCP config', { kind: 'ok', timeout: 3000 });
+  });
 }
 
 $('#btnSettings').addEventListener('click', openSettings);
@@ -415,10 +440,15 @@ window.snap.on('run:busy', ({ busy }) => {
   $('#tab-extractor').classList.toggle('busy', busy);
 });
 
-window.snap.on('run:done', async ({ ok, dir, stats, error, canceled, seconds, install }) => {
+window.snap.on('run:done', async ({ ok, dir, stats, error, canceled, seconds, install, audit }) => {
   // An install has no capture stats to summarise — it either worked or it said why.
   if (install) {
     stopRunPanel(ok ? 'done' : 'fail', ok ? 'Dependencies installed.' : 'Install failed: ' + error);
+    await refreshLibrary();
+    return;
+  }
+  // Audits never open the run panel; whoever started one toasts its summary.
+  if (audit) {
     await refreshLibrary();
     return;
   }
@@ -847,6 +877,11 @@ function renderCard(site) {
       more.push({ icon: 'layers', label: 'Snapshot now…', fn: () => openSnapshotPrompt(site) });
     }
     more.push({ icon: 'history', label: 'Project history', fn: () => openHistory(site) });
+    // Automated pass: axe accessibility scan + internal broken-link crawl.
+    // Findings arrive as [auto] pins in Review Mode, ready for the export.
+    if (!site.missing && !site.attachOnly) {
+      more.push({ icon: 'check', label: 'Run audits (accessibility + links)', fn: () => runSiteAudits(site) });
+    }
     // A dev server does its own hot reload — SiteSlurp's file watcher would only
     // fight it, so the toggle is a static-hosting option.
     if (!command) {
@@ -1916,6 +1951,25 @@ $('#palApply').addEventListener('click', async () => {
   }
 });
 
+/* ---------- audits ---------- */
+// One long toast while it runs (it claims the job slot like a capture), then
+// the counts. The findings themselves land as [auto] pins in Review Mode.
+async function runSiteAudits(site) {
+  const pending = toast(`Auditing ${site.name} — accessibility scan + link crawl…`, { timeout: 0 });
+  try {
+    const s = await invoke('audit:run', { id: site.projectId });
+    const bits = [
+      `${s.axeViolations} accessibility finding${s.axeViolations === 1 ? '' : 's'}`,
+      `${s.brokenLinks} broken link${s.brokenLinks === 1 ? '' : 's'}`,
+    ];
+    toast(`Audits done — ${bits.join(', ')} across ${s.pages} page${s.pages === 1 ? '' : 's'}`
+      + (s.added ? ` · ${s.added} new pin${s.added === 1 ? '' : 's'} in Review Mode` : ' · nothing new'),
+    { kind: 'ok', timeout: 10000 });
+  } finally {
+    pending.remove();
+  }
+}
+
 /* ---------- command palette ----------
    The app has no menu bar. Everything File/Edit/View/Sites/Help used to hold
    lives here instead, plus a row per site in the library, searchable from
@@ -1961,6 +2015,10 @@ function allCommands() {
     if (site.projectId) {
       list.push({ group: 'sites', icon: 'monitor', label: `Open ${site.name} in Studio Browser`,
         fn: () => openStudioBrowser(site) });
+      if (!site.missing && !site.attachOnly) {
+        list.push({ group: 'sites', icon: 'check', label: `Run audits on ${site.name}`,
+          fn: () => runSiteAudits(site) });
+      }
     }
   }
   if (state.library.sites.some(s => s.port)) {
@@ -1970,6 +2028,7 @@ function allCommands() {
 
   list.push(
     { group: 'app', icon: 'gear', label: 'Settings', keys: 'Ctrl ,', fn: openSettings },
+    { group: 'app', icon: 'plug', label: 'Agent access — connect Claude Code or Cursor', fn: openAgentAccess },
     { group: 'app', icon: 'check', label: 'Setup & diagnostics', fn: () => refreshEnv().then(() => openDoctor()) },
     { group: 'app', icon: 'star', label: 'Calibration — taste memory', fn: openCalibration },
     { group: 'app', icon: 'note', label: 'View log', fn: openLogViewer },

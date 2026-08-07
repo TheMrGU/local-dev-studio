@@ -18,6 +18,7 @@ const INVOKE = new Set([
   'version:create', 'version:list', 'version:diff', 'version:readFile', 'version:restore',
   'runtime:state', 'runtime:restart',
   'review:start', 'review:stop', 'review:history', 'review:export',
+  'audit:run',
   'calibration:promote', 'calibration:get', 'calibration:update',
   'calibration:removeAnchor', 'calibration:removePreference',
   'capture:start', 'capture:cancel',

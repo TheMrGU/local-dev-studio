@@ -5,6 +5,28 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 
+// ---------- MCP mode ----------
+// `claude mcp add siteslurp -- "<exe>" --mcp` launches this same binary, and
+// the stdio it holds IS the MCP transport. Re-run ourselves as plain Node on
+// the mcp entry (ELECTRON_RUN_AS_NODE — the lib/paths.js trick), inherit the
+// pipes, and mirror the child's exit: no window, no Chromium, and none of the
+// single-instance handling below, which would otherwise kill this process the
+// moment the real app is running. This must stay ABOVE all app init.
+if (process.argv.includes('--mcp')) {
+  const { spawnSync } = require('child_process');
+  const { unpackedRoot, nodeEnv } = require('./lib/paths');
+  const result = spawnSync(process.execPath, [path.join(unpackedRoot(), 'mcp', 'server.js')], {
+    stdio: 'inherit',
+    env: nodeEnv({
+      SLURP_USERDATA: app.getPath('userData'),
+      SLURP_VERSION: app.getVersion(),
+    }),
+  });
+  // process.exit, not app.quit: nothing below ever ran, there is nothing to
+  // unwind, and the exit code must reach the MCP client that spawned us.
+  process.exit(result.status === null ? 1 : result.status);
+}
+
 const log = require('./lib/logger');
 const settings = require('./lib/settings');
 const browsers = require('./lib/browsers');
@@ -23,8 +45,14 @@ const { listLibrary, describeLocal, invalidate } = require('./lib/library');
 const projects = require('./lib/projects');
 const reviews = require('./lib/reviews');
 const calibration = require('./lib/calibration');
-const { exportReview, renderAnnotation } = require('./lib/reviewExport');
+const { exportReview, renderAnnotation, renderReviewMd } = require('./lib/reviewExport');
 const { ReviewManager } = require('./lib/review');
+const { ControlServer } = require('./lib/control');
+// [PRO] verification loop + audits. Each is wired at exactly one seam below
+// (verifyResolvedLater / checkStaleLater / runAuditsFor) so the Phase 7
+// edition gate is a single check per feature.
+const verify = require('./lib/verify');
+const audits = require('./lib/audits');
 const { StudioBrowsers } = require('./lib/studioBrowser');
 const { captureAnnotationShots } = require('./lib/shots');
 const { locateSource } = require('./lib/sourceline');
@@ -94,6 +122,10 @@ const reviewManager = new ReviewManager({
       log.warn('anchor failed', annotation.id, err.message);
     }
   },
+  // [PRO] a resolve triggers the after-shot + pixel diff; the toolbar's "Run
+  // audits" lands on the same single entry point as the card menu and palette.
+  onResolved: (project, annotation) => verifyResolvedLater(project, annotation),
+  onAudit: project => runAuditsFor(project),
   onReveal: folder => shell.openPath(folder),
   onReferenceHost: async (target, pick) => {
     const port = await hosts.start(target.path, target.port, {
@@ -178,6 +210,64 @@ const studioBrowsers = new StudioBrowsers({
   },
 });
 
+// ---------- control API ----------
+// The loopback door agents come through (lib/control.js owns transport and
+// token; the MCP server in mcp/ is its stdio client). Every dep here is a
+// thin closure over a manager that already exists — the control API must
+// never grow logic of its own.
+const controlServer = new ControlServer({
+  file: path.join(app.getPath('userData'), 'control.json'),
+  version: app.getVersion(),
+  log,
+  projects,
+  reviews,
+  calibration,
+  versions,
+  hostedPort: dir => hosts.portFor(dir),
+  hostProject: async project => {
+    const port = await ensureHosted(project);
+    send('ui:refresh');
+    return { port, url: `http://localhost:${port}/` };
+  },
+  stopProject: project => {
+    tunnels.stop(project.path);
+    reviewManager.disable(project.path);
+    const stopped = hosts.stop(project.path);
+    send('ui:refresh');
+    return stopped;
+  },
+  exportProject: project => exportReview({
+    project,
+    capturesRoot: settings.load().capturesRoot,
+    projectNameFor: pid => {
+      const p = pid && projects.byId(pid);
+      return p ? p.name : null;
+    },
+  }),
+  // The MCP resolve: same store update as the pin popup's Resolve, same [PRO]
+  // verification behind it — this is the loop closing (agent fixes, resolves,
+  // SiteSlurp photographs the proof).
+  resolveAnnotation: async (project, annotation, { note, afterRating } = {}) => {
+    const patch = { resolved: true };
+    if (afterRating !== undefined && afterRating !== null) patch.resolvedRating = afterRating;
+    if (note !== undefined && String(note).trim()) patch.resolvedNote = String(note).trim();
+    const updated = reviews.updateAnnotation(project.id, annotation.id, patch);
+    verifyResolvedLater(project, updated);
+    send('ui:refresh');
+    return updated;
+  },
+  // The current review as REVIEW.md, rendered fresh — the resource an agent
+  // reads is never staler than the store.
+  reviewMarkdown: project => {
+    const all = reviews.listReviews(project.id);
+    const review = all.find(r => !r.exportedAt) || all[all.length - 1];
+    if (!review) return `# Review: ${project.name}\n\nNo review yet — annotate the site in Review Mode first.\n`;
+    return renderReviewMd(project, review,
+      reviews.listAnnotations(project.id, { reviewId: review.id }),
+      pid => { const p = pid && projects.byId(pid); return p ? p.name : null; });
+  },
+});
+
 /** Fill in what the overlay can't know: source file/line from the served
  *  files, screenshots from an offscreen render, and — when the note was made
  *  in a Studio Browser window whose console holds errors — the console tail. */
@@ -212,6 +302,75 @@ async function enrichAnnotation(project, annotation) {
     }
   } catch (err) {
     log.warn('annotation enrich failed', annotation.id, err.message);
+  }
+}
+
+/** Host a project on its registered port (sliding to a free one if squatted)
+ *  and persist what it actually got. The one door review mode, Studio Browser
+ *  and the control API all go through. */
+async function ensureHosted(project) {
+  const runtime = projects.runtimeFor(project);
+  if (runtime.kind === 'command' && runtime.id !== 'attach' && runtimes.needsInstall(project.path, runtime)) {
+    throw new Error(`Dependencies aren't installed yet — run "${runtime.install}" from Runtime settings first.`);
+  }
+  const port = await hosts.start(project.path, project.port, {
+    liveReload: !!project.liveReload, runtime, name: project.name,
+  });
+  if (port !== project.port) projects.update(project.id, { port });
+  return port;
+}
+
+/** Review mode on for a hosted project — plus [PRO] the stale sweep, so pins
+ *  whose element changed since it was noted come up badged. */
+function enableReview(project) {
+  reviewManager.enable(project.path, project.id);
+  checkStaleLater(project);
+}
+
+// ---------- [PRO] verification loop ----------
+// Both live behind this one seam: resolve (from the pin popup or the MCP
+// resolve_annotation tool) re-shoots the element and pixel-diffs it against
+// the original; review start re-checks open pins for visual drift. Fire and
+// forget — verification never blocks the action that triggered it.
+function verifyResolvedLater(project, annotation) {
+  verify.verifyResolved(project, annotation, {
+    port: hosts.portFor(project.path),
+    reviews,
+    shotsDir: reviews.shotsDir(project.id),
+  }).then(score => { if (score !== null) send('ui:refresh'); })
+    .catch(err => log.warn('verify', err.message));
+}
+
+function checkStaleLater(project) {
+  verify.checkStale(project, {
+    port: hosts.portFor(project.path),
+    reviews,
+    shotsDir: reviews.shotsDir(project.id),
+  }).catch(err => log.warn('stale check', err.message));
+}
+
+// ---------- [PRO] audits ----------
+// The single entry point for "Run audits" (overlay toolbar, card menu,
+// command palette, audit:run IPC). Heavyweight: it loads pages in an
+// offscreen window, so it takes the one browser-job slot like a capture does.
+async function runAuditsFor(project) {
+  claimJob('An audit');
+  send('run:status', { phase: 'audit', msg: `Auditing ${project.name}` });
+  try {
+    const port = await ensureHosted(project);
+    const summary = await audits.runAudits(project, {
+      port,
+      reviews,
+      onProgress: msg => send('run:status', { phase: 'audit', msg }),
+    });
+    send('run:done', { ok: true, audit: true, dir: project.path, summary });
+    send('ui:refresh');
+    return summary;
+  } catch (err) {
+    send('run:done', { ok: false, audit: true, error: err.message });
+    throw err;
+  } finally {
+    releaseJob();
   }
 }
 
@@ -332,6 +491,13 @@ async function environment() {
       bundled: !current.singleFilePath,
     },
     capturesRoot: { path: current.capturesRoot, ok: rootWritable },
+    // What the Settings "Agent access" section needs to build a paste-ready
+    // MCP config: how to launch this very binary in --mcp mode.
+    agent: {
+      exe: process.execPath,
+      args: app.isPackaged ? ['--mcp'] : [app.getAppPath(), '--mcp'],
+      controlPort: controlServer.port || null,
+    },
     versions: {
       app: app.getVersion(),
       electron: process.versions.electron,
@@ -851,11 +1017,8 @@ function registerIpc() {
     assertManaged(dir, 'The site folder');
     const project = projects.byPath(dir);
     if (!project) throw new Error('Only library projects can be reviewed — host it once first.');
-    const port = await hosts.start(project.path, project.port, {
-      liveReload: !!project.liveReload, runtime: projects.runtimeFor(project), name: project.name,
-    });
-    if (port !== project.port) projects.update(project.id, { port });
-    reviewManager.enable(project.path, project.id);
+    const port = await ensureHosted(project);
+    enableReview(project);
     const url = `http://localhost:${port}/`;
     log.info('review start', project.path, port);
     await shell.openExternal(url);
@@ -867,23 +1030,24 @@ function registerIpc() {
     return reviewManager.disable(dir);
   });
 
+  // [PRO] "Run audits" — accessibility scan + broken-link crawl, findings
+  // filed as [auto] annotations. Hosts the project first if it isn't.
+  handle('audit:run', async ({ id }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    return runAuditsFor(project);
+  });
+
   // ---------- studio browser ----------
   // Open the dedicated window for a project: host it (if it isn't), turn on
   // review mode so the overlay rides along, and hand the URL to the window.
   handle('studio:open', async ({ id }) => {
     const project = projects.byId(id);
     if (!project) throw new Error('Unknown project.');
-    const runtime = projects.runtimeFor(project);
-    if (runtime.kind === 'command' && runtime.id !== 'attach' && runtimes.needsInstall(project.path, runtime)) {
-      throw new Error(`Dependencies aren't installed yet — run "${runtime.install}" from Runtime settings first.`);
-    }
-    const port = await hosts.start(project.path, project.port, {
-      liveReload: !!project.liveReload, runtime, name: project.name,
-    });
-    if (port !== project.port) projects.update(project.id, { port });
-    reviewManager.enable(project.path, project.id);
+    const port = await ensureHosted(project);
+    enableReview(project);
     const url = `http://localhost:${port}/`;
-    studioBrowsers.open(project, url, { canPin: runtime.kind !== 'command' });
+    studioBrowsers.open(project, url, { canPin: projects.runtimeFor(project).kind !== 'command' });
     send('ui:refresh');
     return { url, port };
   });
@@ -1567,6 +1731,8 @@ if (!app.requestSingleInstanceLock()) {
     registerIpc();
     createWindow();
     initUpdater();
+    // The agent door: loopback only, token-gated, address in control.json.
+    controlServer.start().catch(err => log.warn('control api failed to start', err.message));
     // Fill in a browser on first run without blocking the window.
     resolveBrowser().then(found => send('env:changed', { browser: found })).catch(err => log.warn('browser detect', err));
     autoStartProjects().catch(err => log.warn('auto-host', err));
@@ -1577,6 +1743,9 @@ if (!app.requestSingleInstanceLock()) {
     tunnels.stopAll();
     hosts.stopAll();
     versions.autoUnwatchAll();
+    // Takes control.json with it, so a stopped app can't be mistaken for a
+    // running one by the next MCP call.
+    controlServer.close();
   });
   // Ctrl+C in the terminal during development never reaches before-quit, and a
   // dev server we started would keep running with nothing left to stop it.
@@ -1584,6 +1753,7 @@ if (!app.requestSingleInstanceLock()) {
     process.on(signal, () => {
       tunnels.stopAll();
       hosts.stopAll();
+      controlServer.close();
       setTimeout(() => app.exit(0), 400);
     });
   }

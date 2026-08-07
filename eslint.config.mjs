@@ -23,10 +23,11 @@ const BROWSER_GLOBALS = {
 };
 
 export default [
-  { ignores: ['dist/**', 'node_modules/**', 'build/**'] },
+  // vendor/ holds pinned third-party dist files (axe-core) — not ours to lint.
+  { ignores: ['dist/**', 'node_modules/**', 'build/**', 'vendor/**'] },
   js.configs.recommended,
   {
-    files: ['main.js', 'preload.js', 'lib/**/*.js', 'scripts/**/*.js', 'test/**/*.js'],
+    files: ['main.js', 'preload.js', 'lib/**/*.js', 'mcp/**/*.js', 'scripts/**/*.js', 'test/**/*.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'commonjs',

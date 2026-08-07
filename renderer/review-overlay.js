@@ -230,6 +230,16 @@
           background: ${ACCENT}; color: ${INK}; font-size: 10.5px; font-weight: 700; border: 2px solid ${INK};
           box-shadow: 0 2px 10px rgba(0,0,0,0.5); cursor: pointer; padding: 0; line-height: 17px; text-align: center; }
     .pin.resolved { background: #3A3A43; color: ${GRAY}; }
+    /* Grayscale stays grayscale: a stale pin (element changed since noted)
+       goes dashed instead of colored. */
+    .pin.stale { border-style: dashed; }
+    .ba-row { display: flex; gap: 6px; margin-top: 8px; }
+    .ba-row figure { margin: 0; flex: 1; min-width: 0; }
+    .ba-row img { display: block; width: 100%; border-radius: 6px; border: 1px solid ${LINE}; }
+    .ba-row figcaption { font-size: 10px; color: ${DIM}; margin-top: 3px; text-align: center; }
+    .pin-flag { display: flex; gap: 8px; align-items: center; justify-content: space-between;
+          font-size: 12px; color: ${GRAY}; border: 1px dashed ${LINE}; border-radius: 8px;
+          padding: 6px 8px; margin-top: 8px; }
     .pin-why { font-size: 12.5px; margin: 8px 0 0; color: #fff; }
     .pin-want { font-size: 12.5px; margin: 4px 0 0; color: ${DIM}; }
     .pin-res { font-size: 12.5px; font-weight: 600; color: ${ACCENT}; margin: 8px 0 0; }
@@ -709,9 +719,11 @@
         x = r.right;
         y = r.top;
       }
-      const pin = el('button', 'pin' + (annotation.resolved ? ' resolved' : ''),
+      const pin = el('button', 'pin' + (annotation.resolved ? ' resolved' : '')
+        + (annotation.stale && !annotation.resolved ? ' stale' : ''),
         annotation.resolved ? '✓' : String(index + 1));
-      pin.title = (annotation.input.why || '').slice(0, 120);
+      pin.title = (annotation.input.why || '').slice(0, 120)
+        + (annotation.stale && !annotation.resolved ? ' — changed since noted' : '');
       Object.assign(pin.style, { left: Math.round(x - 10) + 'px', top: Math.round(y - 10) + 'px' });
       pin.addEventListener('click', () => openPinPopup(annotation));
       root.appendChild(pin);
@@ -727,10 +739,15 @@
     closePinPop();
     pinPop = el('div', 'panel');
     const head = `${annotation.input.severity}`
+      + (annotation.auto ? ' · auto' : '')
       + (annotation.input.rating ? ` · ${annotation.input.rating}/10` : '')
       + (annotation.input.axes.length ? ` · ${annotation.input.axes.join(', ')}` : '');
     pinPop.appendChild(el('h3', '', head));
     if (annotation.context.selector) pinPop.appendChild(el('div', 'sel-label', annotation.context.selector));
+    if (annotation.stale && !annotation.resolved) {
+      pinPop.appendChild(el('div', 'pin-flag',
+        'This element changed visually since it was noted — re-check before fixing.'));
+    }
     if (annotation.input.why) pinPop.appendChild(el('p', 'pin-why', annotation.input.why));
     if (annotation.input.want) pinPop.appendChild(el('p', 'pin-want', '→ ' + annotation.input.want));
     if (annotation.context.referenceImage) {
@@ -746,6 +763,39 @@
       pinPop.appendChild(el('p', 'pin-res', 'Resolved'
         + (annotation.resolvedRating && annotation.input.rating
           ? ` — ${annotation.input.rating} → ${annotation.resolvedRating}` : '')));
+      if (annotation.resolvedNote) {
+        pinPop.appendChild(el('p', 'pin-want', 'Fixer: ' + annotation.resolvedNote));
+      }
+      // The verification loop's receipts: the element as it was noted next to
+      // the element after the resolve, with the pixel score.
+      if (annotation.context.screenshotElement && annotation.context.screenshotAfterElement) {
+        const row = el('div', 'ba-row');
+        for (const [kind, label] of [['el', 'before'], ['after_el', 'after']]) {
+          const fig = document.createElement('figure');
+          const img = document.createElement('img');
+          img.alt = label;
+          img.src = API + 'image/' + encodeURIComponent(annotation.id) + '/' + kind;
+          fig.appendChild(img);
+          const caption = kind === 'after_el' && typeof annotation.diffScore === 'number' && annotation.diffScore > 0
+            ? `after · ${Math.max(1, Math.round(annotation.diffScore * 100))}% changed`
+            : label;
+          fig.appendChild(el('figcaption', '', caption));
+          row.appendChild(fig);
+        }
+        pinPop.appendChild(row);
+      }
+      if (annotation.diffScore === 0) {
+        const flag = el('div', 'pin-flag', 'Resolved, but nothing changed visually — reopen?');
+        const reopen = el('button', 'ghost', 'Reopen');
+        reopen.addEventListener('click', async () => {
+          await api.post('update', { id: annotation.id, patch: { resolved: false } }).catch(() => {});
+          await refreshState();
+          closePinPop();
+          renderPins();
+        });
+        flag.appendChild(reopen);
+        pinPop.appendChild(flag);
+      }
     } else {
       pinPop.appendChild(el('div', 'lbl', 'Mark resolved — how is it now?'));
       const row = el('div', 'row');
@@ -918,6 +968,21 @@
       b.addEventListener('click', showOrphans);
       bar.appendChild(b);
     }
+
+    const auditBtn = el('button', '', 'Audits');
+    auditBtn.title = 'Run automated checks — accessibility (axe) and broken links become [auto] pins';
+    auditBtn.addEventListener('click', async () => {
+      auditBtn.disabled = true;
+      toast('Auditing — accessibility scan + link crawl…');
+      try {
+        const s = await api.post('audit');
+        await refreshState();
+        renderPins();
+        toast(`Audits done — ${s.axeViolations} accessibility, ${s.brokenLinks} broken link${s.brokenLinks === 1 ? '' : 's'}`
+          + (s.added ? `, ${s.added} new pin${s.added === 1 ? '' : 's'}` : ', nothing new'));
+      } catch (e) { toast(e.message); } finally { auditBtn.disabled = false; }
+    });
+    bar.appendChild(auditBtn);
 
     const exportBtn = el('button', '', 'Export');
     exportBtn.title = 'Write REVIEW.md + annotations.json + shots for an agent — E';

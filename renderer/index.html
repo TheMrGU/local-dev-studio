@@ -295,6 +295,18 @@
       <span class="mini">While a site is hosted with Auto-snapshot on, a version is saved once your edits
         go quiet for this long. Identical content is never saved twice.</span>
     </label>
+    <details class="advanced-block" id="agentAccess">
+      <summary>Agent access</summary>
+      <span class="mini">Let a coding agent work your reviews over MCP: it reads open annotations and your
+        calibration, fixes the code, resolves each note, and SiteSlurp photographs the proof.
+        Paste one of these while the app is running.</span>
+      <label>Claude Code — run this in a terminal
+        <div class="row"><input id="agentClaude" type="text" readonly spellcheck="false"><button id="agentClaudeCopy" class="small">Copy</button></div>
+      </label>
+      <label>Cursor or any MCP client — add to its mcp.json
+        <div class="row"><input id="agentCursor" type="text" readonly spellcheck="false"><button id="agentCursorCopy" class="small">Copy</button></div>
+      </label>
+    </details>
     <details class="advanced-block">
       <summary>Advanced</summary>
       <label>Page-capture engine <span id="setSfStatus" class="mini"></span>

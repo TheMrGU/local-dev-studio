@@ -34,6 +34,17 @@ falls back to it). That trade costs you the zero-install setup.
 | `simple-cdp` | MIT | Chrome DevTools Protocol client |
 | `ws` | MIT | WebSocket transport for CDP |
 
+## axe-core — MPL-2.0
+
+- Upstream: https://github.com/dequelabs/axe-core
+- Version: **4.13.0**, vendored **unmodified** as `vendor/axe.min.js`
+  (sha256 `c24f097bd2f451d4f933e8bc7d8d539f8672a2ebcb5cc9f9f3eec8ca9470a0c1`)
+- License: Mozilla Public License 2.0 — https://www.mozilla.org/en-US/MPL/2.0/
+- Role: injected into an offscreen window by the "Run audits" feature to scan hosted
+  pages for accessibility violations. It is a pinned single-file distribution, not an
+  npm dependency; the file is used as-is (MPL's file-level copyleft is satisfied by
+  shipping it unmodified with this notice pointing at the upstream source).
+
 ## Electron — MIT
 
 - License text: `LICENSE.electron.txt` next to the executable.

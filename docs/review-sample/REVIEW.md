@@ -59,3 +59,7 @@ Inter, sans-serif 400 · 12px/18px · color #9ca3af · background transparent ·
 
 **What I want**
 Current year, one canonical spelling.
+
+## Resolved this review
+- `nav .cta` (4 → 8) — before shots/ann_b3c4d5e6_el.png → after shots/ann_b3c4d5e6_after_el.png · 41% of pixels changed — fixer's note: switched to the solid button style
+- `.hero img` — before shots/ann_f7a8b9c0_el.png → after shots/ann_f7a8b9c0_after_el.png · verified: nothing changed visually
