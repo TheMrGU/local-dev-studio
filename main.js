@@ -27,6 +27,7 @@ const { captureAnnotationShots } = require('./lib/shots');
 const { locateSource } = require('./lib/sourceline');
 const { makeThumb } = require('./lib/thumbs');
 const { attachAccelerators, zoomBy } = require('./lib/accelerators');
+const { findEditor } = require('./lib/editor');
 
 // This app shipped as "SiteSnap" through 1.x, and the rename moved the profile
 // folder. Copy the old profile (settings, projects, reviews) into the new
@@ -105,13 +106,19 @@ const reviewManager = new ReviewManager({
   },
 });
 hosts.reviewRouter = dir => reviewManager.forDir(dir);
+// "/" serves the project's chosen entry page; the server falls back to its own
+// resolution when nothing is chosen or the chosen file is gone.
+hosts.entryFor = dir => {
+  const project = projects.byPath(dir);
+  return project ? project.entryFile : null;
+};
 
 /** Fill in what the overlay can't know: source file/line from the served
  *  files, then element + context screenshots from an offscreen render. */
 async function enrichAnnotation(project, annotation) {
   try {
     if (annotation.scope === 'element' || annotation.scope === 'region') {
-      const located = locateSource(project.path, annotation);
+      const located = locateSource(project.path, annotation, { entry: project.entryFile });
       const port = hosts.portFor(project.path);
       const patch = { ...located };
       if (port) {
@@ -192,8 +199,8 @@ async function trashWithRetry(target) {
       return;
     } catch (err) {
       if (attempt >= 2) {
-        throw new Error('Could not move the folder to the Recycle Bin — close anything using it '
-          + '(Explorer, an editor, a browser tab) and try again.');
+        throw new Error('Could not move the folder to the system trash — close anything using it '
+          + '(a file manager, an editor, a browser tab) and try again.');
       }
       await new Promise(resolve => setTimeout(resolve, 350));
     }
@@ -390,6 +397,14 @@ function handle(channel, fn) {
 function registerIpc() {
   handle('env:get', () => environment());
 
+  handle('update:install', () => {
+    if (!updater) throw new Error('No update is ready to install.');
+    // quitAndInstall goes through before-quit, so tunnels and dev servers come
+    // down the same way they do on a normal exit.
+    updater.quitAndInstall(true, true);
+    return true;
+  });
+
   // Window-level actions the command palette offers now that there is no menu
   // to hang them off. Deliberately a fixed allowlist, not an eval of a role.
   handle('win:action', ({ action }) => {
@@ -453,6 +468,7 @@ function registerIpc() {
           projectPort: project.port,
           autoStart: project.autoStart,
           liveReload: project.liveReload,
+          reviewActive: reviewManager.isActive(site.dir),
         }
         : site;
     });
@@ -465,6 +481,7 @@ function registerIpc() {
         projectPort: project.port,
         autoStart: project.autoStart,
         liveReload: project.liveReload,
+        reviewActive: reviewManager.isActive(project.path),
         port: hosts.portFor(project.path),
         runtimeState: hosts.runtimeState(project.path),
       });
@@ -582,6 +599,57 @@ function registerIpc() {
     return project.liveReload;
   });
 
+  // ---------- entry page ----------
+  // Which page "/" serves. Stored in the registry since Studio shipped, but
+  // only now choosable; a dev-server project decides its own routes.
+  handle('project:pages', ({ id }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    if (projects.runtimeFor(project).kind === 'command') {
+      throw new Error('A dev server decides its own pages — entry pages apply to static sites.');
+    }
+    const SKIP = new Set(['node_modules', 'dist', 'build', 'out', 'vendor', 'target', '__pycache__']);
+    const pages = [];
+    (function walk(dir, rel, depth) {
+      if (depth > 3 || pages.length >= 400) return;
+      let entries = [];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || SKIP.has(entry.name)) continue;
+        const next = rel ? rel + '/' + entry.name : entry.name;
+        if (entry.isDirectory()) walk(path.join(dir, entry.name), next, depth + 1);
+        else if (/\.html?$/i.test(entry.name)) pages.push(next);
+      }
+    })(project.path, '', 0);
+    // Homepages tend to have the shortest names — same heuristic as resolveEntry.
+    pages.sort((a, b) => a.length - b.length || a.localeCompare(b));
+    return { pages, entryFile: project.entryFile };
+  });
+
+  handle('project:setEntry', ({ id, entryFile }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    const rel = String(entryFile || '').replace(/\\/g, '/');
+    if (!rel || rel.split('/').some(seg => !seg || seg.startsWith('.'))) {
+      throw new Error('That is not a page inside the project.');
+    }
+    const full = path.resolve(project.path, rel);
+    if (!full.startsWith(path.resolve(project.path) + path.sep)) {
+      throw new Error('That is not a page inside the project.');
+    }
+    let st = null;
+    try { st = fs.statSync(full); } catch { /* reported below */ }
+    if (!st || !st.isFile()) throw new Error('That page no longer exists.');
+    projects.update(id, { entryFile: rel });
+    log.info('entry page set', project.path, rel);
+    // The thumbnail is a picture of the entry page — re-render it to match.
+    const out = project.kind === 'local' ? projects.thumbPath(project.id) : undefined;
+    makeThumb(project.path, out, { entry: rel })
+      .then(made => { invalidate(project.path); if (made) send('ui:refresh'); })
+      .catch(() => {});
+    return { entryFile: rel };
+  });
+
   handle('review:start', async ({ dir }) => {
     assertManaged(dir, 'The site folder');
     const project = projects.byPath(dir);
@@ -616,6 +684,51 @@ function registerIpc() {
   });
 
   handle('calibration:promote', ({ text }) => calibration.addStandingPreference(text));
+
+  // ---------- calibration manager ----------
+  // Anchors and standing preferences were write-only until now — visible only
+  // in exported calibration.md. This is the read/edit surface behind the
+  // Calibration modal.
+  handle('calibration:get', () => {
+    const data = calibration.load();
+    return {
+      updatedAt: data.updatedAt,
+      standingPreferences: data.standingPreferences.slice(),
+      anchors: data.anchors.map(anchor => ({
+        ...anchor,
+        screenshotUrl: anchor.screenshot && fs.existsSync(anchor.screenshot)
+          ? pathToFileURL(anchor.screenshot).href
+          : null,
+      })),
+    };
+  });
+
+  handle('calibration:update', ({ preference, anchor }) => {
+    if (preference) return calibration.updatePreference(preference.index, preference.text);
+    if (anchor) return calibration.updateAnchor(anchor.index, { summary: anchor.summary });
+    throw new Error('Nothing to update.');
+  });
+
+  handle('calibration:removeAnchor', ({ index }) => calibration.removeAnchor(index));
+  handle('calibration:removePreference', ({ index }) => calibration.removePreference(index));
+
+  // Manual export from the history modal: an open review exports for the first
+  // time, an exported one re-exports (fresh calibration.md, same folder shape).
+  handle('review:export', ({ id, reviewId }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    const result = exportReview({
+      project,
+      capturesRoot: settings.load().capturesRoot,
+      reviewId: reviewId || null,
+      projectNameFor: pid => {
+        const p = pid && projects.byId(pid);
+        return p ? p.name : null;
+      },
+    });
+    log.info('review exported from history', project.name, result.folder);
+    return result;
+  });
 
   handle('capture:start', opts => {
     // Validate before returning so the UI can show input errors immediately.
@@ -742,7 +855,7 @@ function registerIpc() {
     const port = hosts.portFor(dir);
     const state = hosts.runtimeState(dir);
     const url = port && state && state.status === 'ready' ? `http://localhost:${port}/` : null;
-    const thumb = await makeThumb(dir, out, { url });
+    const thumb = await makeThumb(dir, out, { url, entry: project ? project.entryFile : null });
     invalidate(dir);
     return thumb ? pathToFileURL(thumb).href + '?t=' + Date.now() : null;
   });
@@ -755,7 +868,7 @@ function registerIpc() {
   handle('open:editor', ({ dir }) => {
     assertManaged(dir, 'That folder');
     const editor = findEditor();
-    if (!editor) throw new Error('VS Code not found. Use "Open folder" instead.');
+    if (!editor) throw new Error('No code editor found — install VS Code or Cursor, or use "Open folder" instead.');
     // Args array, never a shell string — folder names are user data.
     spawn(editor, [dir], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
     return true;
@@ -785,11 +898,11 @@ function registerIpc() {
     const offerRaw = !!(rawDir && isInRoot(rawDir) && fs.existsSync(rawDir));
     const { response, checkboxChecked } = await dialog.showMessageBox(win, {
       type: 'warning',
-      buttons: ['Move to Recycle Bin', 'Cancel'],
+      buttons: ['Move to trash', 'Cancel'],
       defaultId: 0,
       cancelId: 1,
       title: 'Delete site',
-      message: `Move "${folder || path.basename(dir)}" to the Recycle Bin?`,
+      message: `Move "${folder || path.basename(dir)}" to the system trash?`,
       detail: dir,
       ...(offerRaw ? { checkboxLabel: 'Also delete the raw snapshot it was extracted from', checkboxChecked: false } : {}),
     });
@@ -822,23 +935,34 @@ function registerIpc() {
   });
 }
 
-const EDITOR_CANDIDATES = [
-  ['LOCALAPPDATA', 'Programs\\Microsoft VS Code\\Code.exe'],
-  ['PROGRAMFILES', 'Microsoft VS Code\\Code.exe'],
-  ['PROGRAMFILES(X86)', 'Microsoft VS Code\\Code.exe'],
-  ['LOCALAPPDATA', 'Programs\\Microsoft VS Code Insiders\\Code - Insiders.exe'],
-  ['LOCALAPPDATA', 'Programs\\cursor\\Cursor.exe'],
-];
+// ---------- updates ----------
+// electron-updater against the GitHub Releases feed. Downloads happen in the
+// background; installing is always a user action — the renderer shows a toast
+// with a Restart button and nothing restarts on its own.
+let updater = null;
 
-function findEditor() {
-  if (process.platform !== 'win32') return null;
-  for (const [envKey, rel] of EDITOR_CANDIDATES) {
-    const base = process.env[envKey];
-    if (!base) continue;
-    const full = path.join(base, rel);
-    if (fs.existsSync(full)) return full;
+function initUpdater() {
+  if (!app.isPackaged) return; // dev runs have no feed and no installer
+  let autoUpdater;
+  try {
+    ({ autoUpdater } = require('electron-updater'));
+  } catch (err) {
+    log.warn('updater unavailable', err.message);
+    return;
   }
-  return null;
+  autoUpdater.logger = log;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true; // a quit installs the waiting update; no restart forced
+  autoUpdater.on('update-downloaded', info => {
+    log.info('update downloaded', info.version);
+    send('update:ready', { version: info.version });
+  });
+  // An offline check failing is routine, not a dialog.
+  autoUpdater.on('error', err => log.warn('updater', err && err.message ? err.message : String(err)));
+  const check = () => autoUpdater.checkForUpdates().catch(err => log.warn('updater check', err.message));
+  check();
+  setInterval(check, 4 * 60 * 60 * 1000).unref();
+  updater = autoUpdater;
 }
 
 // ---------- window ----------
@@ -866,16 +990,22 @@ function createWindow() {
     backgroundColor: '#0A0A0B',
     title: 'SiteSlurp Studio',
     show: false,
-    // No OS title bar and no menu strip: the app draws its own 46px bar and
+    // No OS title bar and no menu strip: the app draws its own 46px bar.
     // Windows paints only the minimise/maximise/close buttons into the reserved
-    // slot on the right. The renderer positions itself with the
-    // env(titlebar-area-*) variables this turns on.
-    titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#0A0A0B',
-      symbolColor: '#8E8E96',
-      height: TITLEBAR_HEIGHT,
-    },
+    // slot on the right (the renderer positions itself with the
+    // env(titlebar-area-*) variables the overlay turns on); macOS instead
+    // inset-places its traffic lights on the left; Linux gets the renderer's
+    // own fallback buttons because neither mechanism exists there.
+    ...(process.platform === 'darwin'
+      ? { titleBarStyle: 'hiddenInset' }
+      : {
+        titleBarStyle: 'hidden',
+        titleBarOverlay: {
+          color: '#0A0A0B',
+          symbolColor: '#8E8E96',
+          height: TITLEBAR_HEIGHT,
+        },
+      }),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -960,6 +1090,8 @@ function runSelfTest() {
         }
         await window.snap.invoke('settings:get');
         await window.snap.invoke('log:tail');
+        const cal = await window.snap.invoke('calibration:get');
+        results.push('calibration=' + cal.anchors.length + '+' + cal.standingPreferences.length);
         return results.join(' ');
       })()`);
       log.info('selftest ipc:', health);
@@ -999,6 +1131,9 @@ function runSelfTest() {
           studio: ['#doctorClose', '#tab-studio'],
           commands: ['#btnPalette'],
           settings: ['#btnSettings'],
+          // The Settings link works even while its modal is hidden — clicking
+          // it directly avoids racing openSettings' async fill-in.
+          calibration: ['#doctorClose', '#setCalibration'],
           // The first card's menu, then its first item — "How to serve this…"
           // on a local project.
           runtime: ['#doctorClose', '#tab-studio', '.card .menu-btn', '.menu-pop button'],
@@ -1111,6 +1246,7 @@ if (!app.requestSingleInstanceLock()) {
     log.info(`SiteSlurp ${app.getVersion()} starting — electron ${process.versions.electron}`);
     registerIpc();
     createWindow();
+    initUpdater();
     // Fill in a browser on first run without blocking the window.
     resolveBrowser().then(found => send('env:changed', { browser: found })).catch(err => log.warn('browser detect', err));
     autoStartProjects().catch(err => log.warn('auto-host', err));

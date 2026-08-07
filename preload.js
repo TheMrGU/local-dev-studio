@@ -9,8 +9,11 @@ const INVOKE = new Set([
   'library:list',
   'project:addLocal', 'project:remove', 'project:setAutoStart', 'project:setLiveReload',
   'project:runtimes', 'project:setRuntime', 'project:install',
+  'project:pages', 'project:setEntry',
   'runtime:state', 'runtime:restart',
-  'review:start', 'review:stop', 'review:history', 'calibration:promote',
+  'review:start', 'review:stop', 'review:history', 'review:export',
+  'calibration:promote', 'calibration:get', 'calibration:update',
+  'calibration:removeAnchor', 'calibration:removePreference',
   'capture:start', 'capture:cancel',
   'extract:run',
   'host:start', 'host:stop', 'host:stopAll',
@@ -20,6 +23,7 @@ const INVOKE = new Set([
   'video:fix', 'thumb:make',
   'open:folder', 'open:editor', 'open:url', 'open:log', 'open:notices', 'log:tail',
   'site:delete', 'shell:confirm',
+  'update:install',
   'win:action',
 ]);
 
@@ -27,8 +31,9 @@ const EVENTS = new Set([
   'run:log', 'run:status', 'run:progress', 'run:done', 'run:busy', 'runtime:state',
   'share:state', 'share:download',
   'zip:progress', 'env:changed', 'review:exported', 'review:promote',
-  'ui:refresh', 'ui:settings', 'ui:focus-url', 'ui:doctor', 'ui:about', 'ui:tab',
+  'ui:refresh', 'ui:settings', 'ui:focus-url',
   'ui:palette',
+  'update:ready',
 ]);
 
 // Electron wraps handler errors as "Error invoking remote method 'x': Error: real

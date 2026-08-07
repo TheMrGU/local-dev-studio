@@ -708,7 +708,7 @@ function renderCard(site) {
   const deleteSite = async () => {
     try {
       const done = await invoke('site:delete', { dir: site.dir, folder: site.folder });
-      if (done) toast('Moved to the Recycle Bin', { kind: 'ok', timeout: 3000 });
+      if (done) toast('Moved to the system trash', { kind: 'ok', timeout: 3000 });
     } finally {
       // Refresh even on failure — a partial delete leaves stale cards behind.
       await refreshLibrary();
@@ -766,7 +766,18 @@ function renderCard(site) {
       await refreshLibrary();
     } });
   }
+  // Which page "/" opens on — a static-serving question; a dev server routes itself.
+  if (site.projectId && !site.missing && !command) {
+    more.push({ icon: 'home', label: 'Set entry page…', fn: () => openEntry(site) });
+  }
   if (site.projectId) {
+    if (site.reviewActive) {
+      more.push({ icon: 'stop', label: 'End review mode', fn: async () => {
+        await invoke('review:stop', { dir: site.dir });
+        toast('Review mode off — the overlay is gone on next reload', { kind: 'ok', timeout: 4000 });
+        await refreshLibrary();
+      } });
+    }
     more.push({ icon: 'history', label: 'Review history', fn: () => openHistory(site) });
     // A dev server does its own hot reload — SiteSlurp's file watcher would only
     // fight it, so the toggle is a static-hosting option.
@@ -820,7 +831,7 @@ function renderCard(site) {
   if (site.kind === 'local') {
     actions.appendChild(iconBtn('trash', 'Remove from library (files stay on disk)', removeLocal));
   } else {
-    actions.appendChild(iconBtn('trash', 'Delete (to Recycle Bin)', deleteSite));
+    actions.appendChild(iconBtn('trash', 'Delete (moves to the system trash)', deleteSite));
   }
   actions.appendChild(menuButton(more));
 
@@ -984,15 +995,195 @@ async function openHistory(site) {
     info.appendChild(title);
     info.appendChild(meta);
     row.appendChild(info);
+    const actions = document.createElement('div');
+    actions.className = 'history-actions';
+    if (review.annotations) {
+      actions.appendChild(iconBtn('export', review.exportedAt ? 'Re-export this review' : 'Export this review', async () => {
+        const { folder } = await invoke('review:export', { id: site.projectId, reviewId: review.id });
+        toast(`Review of ${site.name} exported`, {
+          kind: 'ok', timeout: 12000,
+          action: { label: 'Open folder', fn: () => invoke('open:folder', { dir: folder }) },
+        });
+        await openHistory(site); // the row's exported state just changed
+      }));
+    }
     if (review.exportFolder) {
-      row.appendChild(iconBtn('folder', 'Open export folder', () =>
+      actions.appendChild(iconBtn('folder', 'Open export folder', () =>
         invoke('open:folder', { dir: review.exportFolder })));
     }
+    row.appendChild(actions);
     list.appendChild(row);
   }
   $('#historyModal').classList.remove('hidden');
 }
 $('#historyClose').addEventListener('click', () => $('#historyModal').classList.add('hidden'));
+
+/* ---------- calibration manager ----------
+   Anchors and standing preferences were write-only until now. Each row edits
+   in place; deletes ask first — this file is the asset that grows. */
+function calRow({ badge = null, text, meta = '', img = null, onSave = null, onDelete }) {
+  const row = document.createElement('div');
+  row.className = 'cal-row';
+  if (img) {
+    const shot = document.createElement('img');
+    shot.className = 'cal-shot';
+    shot.src = img;
+    shot.alt = '';
+    row.appendChild(shot);
+  }
+  if (badge) {
+    const chip = document.createElement('span');
+    chip.className = 'cal-badge';
+    chip.textContent = badge;
+    row.appendChild(chip);
+  }
+  const body = document.createElement('div');
+  body.className = 'cal-body';
+  const line = document.createElement('span');
+  line.className = 'cal-text';
+  line.textContent = text;
+  body.appendChild(line);
+  if (meta) {
+    const mini = document.createElement('span');
+    mini.className = 'cal-meta mini';
+    mini.textContent = meta;
+    body.appendChild(mini);
+  }
+  row.appendChild(body);
+
+  if (onSave) {
+    row.appendChild(iconBtn('edit', 'Edit', () => {
+      const edit = document.createElement('div');
+      edit.className = 'cal-edit';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = text;
+      input.spellcheck = false;
+      const save = document.createElement('button');
+      save.className = 'primary small';
+      save.textContent = 'Save';
+      save.addEventListener('click', async () => {
+        try { await onSave(input.value); await openCalibration(); } catch (err) { failed(err); }
+      });
+      edit.appendChild(input);
+      edit.appendChild(save);
+      body.replaceChildren(edit);
+      input.focus();
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') save.click();
+        e.stopPropagation(); // Escape while typing cancels the edit, not the modal
+        if (e.key === 'Escape') openCalibration();
+      });
+    }));
+  }
+  row.appendChild(iconBtn('trash', 'Delete', async () => {
+    const yes = await invoke('shell:confirm', {
+      title: 'Delete from calibration',
+      message: 'Remove this from your calibration?',
+      detail: text.length > 120 ? text.slice(0, 120) + '…' : text,
+      confirmLabel: 'Remove',
+    });
+    if (!yes) return;
+    await onDelete();
+    await openCalibration();
+  }));
+  return row;
+}
+
+async function openCalibration() {
+  let data;
+  try { data = await invoke('calibration:get'); } catch (err) { failed(err); return; }
+
+  const prefs = $('#calPrefs');
+  prefs.innerHTML = '';
+  if (!data.standingPreferences.length) {
+    prefs.innerHTML = '<div class="history-empty">Nothing standing yet. When a complaint repeats across reviews, a toast offers to promote it here.</div>';
+  }
+  data.standingPreferences.forEach((text, index) => prefs.appendChild(calRow({
+    text,
+    onSave: value => invoke('calibration:update', { preference: { index, text: value } }),
+    onDelete: () => invoke('calibration:removePreference', { index }),
+  })));
+
+  const anchors = $('#calAnchors');
+  anchors.innerHTML = '';
+  if (!data.anchors.length) {
+    anchors.innerHTML = '<div class="history-empty">No anchors yet. Resolving an annotation as an anchor records what that rating looks like.</div>';
+  }
+  data.anchors.forEach((anchor, index) => anchors.appendChild(calRow({
+    badge: `${anchor.rating}/10`,
+    text: anchor.summary,
+    meta: [anchor.axis, anchor.note].filter(Boolean).join(' · '),
+    img: anchor.screenshotUrl,
+    onSave: value => invoke('calibration:update', { anchor: { index, summary: value } }),
+    onDelete: () => invoke('calibration:removeAnchor', { index }),
+  })));
+
+  $('#calibrationModal').classList.remove('hidden');
+}
+$('#calClose').addEventListener('click', () => $('#calibrationModal').classList.add('hidden'));
+$('#setCalibration').addEventListener('click', () => {
+  $('#settingsModal').classList.add('hidden');
+  openCalibration();
+});
+
+/* ---------- log viewer ----------
+   The tail, in the app, refreshing while open — for the "what just happened"
+   check that doesn't deserve a trip to a text editor. */
+let logTimer = null;
+async function openLogViewer() {
+  $('#logPath').textContent = (state.env && state.env.logPath) || '';
+  $('#logModal').classList.remove('hidden');
+  const el = $('#logText');
+  const refresh = async () => {
+    if ($('#logModal').classList.contains('hidden')) { clearInterval(logTimer); return; }
+    let text;
+    try { text = await invoke('log:tail'); } catch { return; }
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+    el.textContent = text;
+    if (atBottom) el.scrollTop = el.scrollHeight;
+  };
+  el.textContent = '';
+  await refresh();
+  el.scrollTop = el.scrollHeight;
+  clearInterval(logTimer);
+  logTimer = setInterval(refresh, 2000);
+}
+$('#logClose').addEventListener('click', () => { $('#logModal').classList.add('hidden'); clearInterval(logTimer); });
+$('#logOpen').addEventListener('click', () => invoke('open:log').catch(failed));
+
+/* ---------- entry page picker ---------- */
+async function openEntry(site) {
+  let result;
+  try { result = await invoke('project:pages', { id: site.projectId }); } catch (err) { failed(err); return; }
+  $('#entryName').textContent = '— ' + site.name;
+  const list = $('#entryList');
+  list.innerHTML = '';
+  if (!result.pages.length) {
+    list.innerHTML = '<div class="history-empty">No HTML pages found in this folder.</div>';
+  }
+  for (const page of result.pages) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'entry-row' + (page === result.entryFile ? ' current' : '');
+    row.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-home"/></svg>'
+      + '<span></span><svg class="icon tick-icon" aria-hidden="true"><use href="#i-check"/></svg>';
+    row.querySelector('span').textContent = page;
+    row.addEventListener('click', async () => {
+      try {
+        await invoke('project:setEntry', { id: site.projectId, entryFile: page });
+        $('#entryModal').classList.add('hidden');
+        toast(`"${site.name}" now opens on ${page}`, { kind: 'ok' });
+        await refreshLibrary();
+      } catch (err) {
+        failed(err);
+      }
+    });
+    list.appendChild(row);
+  }
+  $('#entryModal').classList.remove('hidden');
+}
+$('#entryClose').addEventListener('click', () => $('#entryModal').classList.add('hidden'));
 
 /* ---------- runtime: how a project gets served ----------
    A folder of HTML is served straight off disk, everything else needs a
@@ -1324,6 +1515,8 @@ function allCommands() {
   list.push(
     { group: 'app', icon: 'gear', label: 'Settings', keys: 'Ctrl ,', fn: openSettings },
     { group: 'app', icon: 'check', label: 'Setup & diagnostics', fn: () => refreshEnv().then(() => openDoctor()) },
+    { group: 'app', icon: 'star', label: 'Calibration — taste memory', fn: openCalibration },
+    { group: 'app', icon: 'note', label: 'View log', fn: openLogViewer },
     { group: 'app', icon: 'note', label: 'Open log file', fn: () => invoke('open:log').catch(failed) },
     { group: 'app', icon: 'info', label: 'About SiteSlurp Studio', fn: openAbout },
     { group: 'view', icon: 'zoom-in', label: 'Zoom in', keys: 'Ctrl +', fn: winAction('zoomIn') },
@@ -1401,18 +1594,26 @@ $('#cmdInput').addEventListener('keydown', e => {
 window.snap.on('ui:palette', openCommands);
 window.snap.on('ui:refresh', refreshLibrary);
 window.snap.on('ui:settings', openSettings);
-window.snap.on('ui:doctor', () => refreshEnv().then(() => openDoctor()));
-window.snap.on('ui:about', openAbout);
-window.snap.on('ui:tab', name => setTab(name));
 window.snap.on('ui:focus-url', () => { setTab('extractor'); $('#url').focus(); $('#url').select(); });
 window.snap.on('env:changed', () => refreshEnv());
+
+// The updater downloaded a new version in the background. Installing is the
+// user's call — this toast is the only nudge, and it stays until acted on.
+window.snap.on('update:ready', ({ version }) => {
+  toast(`SiteSlurp ${version} is downloaded and ready`, {
+    kind: 'ok', timeout: 0,
+    action: { label: 'Restart to update', fn: () => invoke('update:install').catch(failed) },
+  });
+});
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeMenu();
-    for (const sel of ['#cmdModal', '#settingsModal', '#doctorModal', '#aboutModal', '#paletteDrawer', '#historyModal']) {
+    for (const sel of ['#cmdModal', '#settingsModal', '#doctorModal', '#aboutModal', '#paletteDrawer',
+      '#historyModal', '#calibrationModal', '#logModal', '#entryModal']) {
       $(sel).classList.add('hidden');
     }
+    clearInterval(logTimer);
   }
   // Ctrl+K also arrives from the main process, but binding it here keeps the
   // palette working if focus is somewhere that swallows the accelerator.
@@ -1434,7 +1635,8 @@ document.addEventListener('keydown', e => {
 });
 
 // Click the backdrop to dismiss a modal.
-for (const id of ['cmdModal', 'settingsModal', 'doctorModal', 'aboutModal', 'historyModal', 'runtimeModal']) {
+for (const id of ['cmdModal', 'settingsModal', 'doctorModal', 'aboutModal', 'historyModal', 'runtimeModal',
+  'calibrationModal', 'logModal', 'entryModal']) {
   document.getElementById(id).addEventListener('click', e => {
     if (e.target.id === id) e.target.classList.add('hidden');
   });

@@ -21,6 +21,7 @@
     "e2e": "node scripts/e2e.js"
   },
   "dependencies": {
+    "electron-updater": "^6.6.2",
     "single-file-cli": "^2.0.83"
   },
   "devDependencies": {
@@ -84,6 +85,10 @@
       "artifactName": "SiteSlurp-${version}-portable.${ext}",
       "unpackDirName": "SiteSlurp"
     },
-    "publish": null
+    "publish": {
+      "provider": "github",
+      "owner": "TheMrGU",
+      "repo": "siteslurp"
+    }
   }
 }

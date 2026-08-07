@@ -21,10 +21,11 @@ const target = argv.find((arg, i) => i !== captureIndex && arg !== captureUrl &&
 const out = path.join(os.tmpdir(), 'siteslurp-smoke.png');
 fs.rmSync(out, { force: true });
 
+// In plain Node, require('electron') resolves to the path of the binary —
+// electron.exe, Electron.app/…/Electron or electron, whichever this OS uses.
 const [command, args] = target
   ? [path.resolve(target), ['--selftest']]
-  : [path.join(__dirname, '..', 'node_modules', 'electron', 'dist', 'electron.exe'),
-     [path.join(__dirname, '..'), '--selftest']];
+  : [require('electron'), [path.join(__dirname, '..'), '--selftest']];
 
 if (!fs.existsSync(command)) {
   console.error(`Not found: ${command}`);

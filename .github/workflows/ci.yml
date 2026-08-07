@@ -1,0 +1,34 @@
+# Lint + plain-node checks everywhere, then the windowed selftest — the same
+# `npm run smoke` gate a release build has to pass, on all three OSes.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Smoke (windowed selftest)
+        if: runner.os != 'Linux'
+        run: npm run smoke
+      - name: Smoke (windowed selftest, virtual display)
+        if: runner.os == 'Linux'
+        # CI runners restrict unprivileged user namespaces, which the Chromium
+        # sandbox needs; a virtual display stands in for a monitor.
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
+        run: xvfb-run --auto-servernum npm run smoke

@@ -425,6 +425,44 @@ async function entryTests() {
     }
   });
 
+  await check('a chosen entry page overrides resolution; a stale choice falls back', async () => {
+    const dir = scratch('entry-chosen');
+    fs.writeFileSync(path.join(dir, '_index.html'), '<h1>sitemap</h1>');
+    fs.writeFileSync(path.join(dir, '_en.html'), '<h1>resolved home</h1>');
+    fs.writeFileSync(path.join(dir, 'pricing.html'), '<h1>chosen page</h1>');
+    fs.mkdirSync(path.join(dir, '.siteslurp'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.siteslurp', 'sneaky.html'), '<h1>internal</h1>');
+    fs.writeFileSync(path.join(dir, 'siteslurp.json'), JSON.stringify({ url: 'https://x.test/en' }));
+
+    let chosen = 'pricing.html';
+    const server = http.createServer(makeHandler(dir, { entry: () => chosen }));
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const port = server.address().port;
+      ok((await fetchBody('127.0.0.1', port, '/')).includes('chosen page'), 'the chosen entry serves at /');
+      chosen = 'gone.html';
+      ok((await fetchBody('127.0.0.1', port, '/')).includes('resolved home'), 'a deleted choice falls back');
+      chosen = '.siteslurp/sneaky.html';
+      ok((await fetchBody('127.0.0.1', port, '/')).includes('resolved home'), 'dot-paths never become the entry');
+    } finally {
+      server.close();
+    }
+  });
+
+  await check('the host manager asks entryFor and serves that page at the root', async () => {
+    const dir = scratch('entry-hostmgr');
+    fs.writeFileSync(path.join(dir, 'index.html'), '<h1>default</h1>');
+    fs.writeFileSync(path.join(dir, 'landing.html'), '<h1>the chosen one</h1>');
+    const hosts = new HostManager();
+    hosts.entryFor = () => 'landing.html';
+    try {
+      const port = await hosts.start(dir, 0);
+      ok((await fetchBody('127.0.0.1', port)).includes('the chosen one'), 'entryFor drives the root page');
+    } finally {
+      hosts.stopAll();
+    }
+  });
+
   await check('hosting binds both loopbacks and skips a port whose IPv6 side is taken', async () => {
     const dir = scratch('host-dual');
     fs.writeFileSync(path.join(dir, 'index.html'), '<h1>ours</h1>');
@@ -775,6 +813,26 @@ async function reviewStoreTests() {
     const md = calibrationStore.renderMarkdown();
     ok(md.indexOf('9/10') < md.indexOf('4/10'), 'anchors sorted high to low');
     ok(md.includes('Standing preferences'), 'preferences section present');
+  });
+
+  await check('the calibration manager edits and removes by index, refusing stale ones', async () => {
+    const prefs = calibrationStore.load().standingPreferences;
+    const index = prefs.length - 1;
+    eq(calibrationStore.updatePreference(index, '  Near-black, never #000  '), 'Near-black, never #000');
+    eq(calibrationStore.load().standingPreferences[index], 'Near-black, never #000');
+    await throws(() => calibrationStore.updatePreference(index, '   '), 'empty preference refused');
+    await throws(() => calibrationStore.updatePreference(99, 'x'), 'stale preference index refused');
+    ok(calibrationStore.removePreference(index), 'preference removed');
+    eq(calibrationStore.load().standingPreferences.length, index);
+
+    const anchors = calibrationStore.load().anchors;
+    const last = anchors.length - 1;
+    eq(calibrationStore.updateAnchor(last, { summary: 'Tighter: 72px display, near-black' }).summary,
+      'Tighter: 72px display, near-black');
+    await throws(() => calibrationStore.updateAnchor(last, { summary: '' }), 'empty summary refused');
+    await throws(() => calibrationStore.removeAnchor(99), 'stale anchor index refused');
+    ok(calibrationStore.removeAnchor(last), 'anchor removed');
+    eq(calibrationStore.load().anchors.length, last);
   });
 
   await check('locateSource finds a unique line and refuses ambiguity', () => {
@@ -1141,6 +1199,13 @@ async function miscTests() {
     delete require.cache[require.resolve('../lib/settings')];
     const fresh = require('../lib/settings');
     ok(fresh.load().defaultPort === 8008, 'fell back to defaults');
+  });
+
+  await check('editor detection answers with a real executable or an honest null', () => {
+    const { findEditor } = require('../lib/editor');
+    const editor = findEditor();
+    if (editor === null) return; // machines without an editor are a valid answer
+    ok(typeof editor === 'string' && fs.statSync(editor).isFile(), 'points at a file: ' + editor);
   });
 }
 

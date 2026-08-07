@@ -37,6 +37,10 @@
   <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9M18.4 6.6a9 9 0 1 1-12.8 0"/></symbol>
   <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-5M12 8h.01"/></symbol>
   <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 3.9M15.4 6.6 8.6 10.5"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 2.5 2.9 5.9 6.5 1-4.7 4.6 1.1 6.5-5.8-3-5.8 3 1.1-6.5L2.6 9.4l6.5-1Z"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></symbol>
+  <symbol id="i-export" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M9 22V12h6v10"/></symbol>
 </svg>
 
 <!-- The window's own title bar. There is no OS frame and no menu strip behind
@@ -290,6 +294,7 @@
         <span class="mini">Leave empty to use the copy that ships with SiteSlurp.</span>
       </label>
     </details>
+    <button id="setCalibration" class="link-btn">Calibration — review your standing preferences and rating anchors&hellip;</button>
     <div class="modal-actions">
       <button id="setCancel" class="small">Cancel</button>
       <button id="setSave" class="primary small">Save</button>
@@ -316,6 +321,47 @@
     <div id="historyList" class="history-list"></div>
     <div class="modal-actions">
       <button id="historyClose" class="primary small">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Calibration manager: the first read/edit surface for the taste memory that
+     until now only existed inside exported calibration.md files. -->
+<div id="calibrationModal" class="modal hidden">
+  <div class="modal-card cal-card">
+    <h3>Calibration</h3>
+    <p class="modal-hint">Your taste memory. Standing preferences apply to every review; anchors are
+      real annotations that show what each rating means. Both ship with every export.</p>
+    <h4 class="cal-heading">Standing preferences</h4>
+    <div id="calPrefs" class="cal-list"></div>
+    <h4 class="cal-heading">Rating anchors</h4>
+    <div id="calAnchors" class="cal-list"></div>
+    <div class="modal-actions">
+      <button id="calClose" class="primary small">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="logModal" class="modal hidden">
+  <div class="modal-card log-card">
+    <h3>Log</h3>
+    <p class="modal-hint mini" id="logPath"></p>
+    <pre id="logText" class="log-pre" tabindex="0"></pre>
+    <div class="modal-actions">
+      <button id="logOpen" class="small">Open log file</button>
+      <button id="logClose" class="primary small">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="entryModal" class="modal hidden">
+  <div class="modal-card">
+    <h3>Entry page <span id="entryName" class="mini"></span></h3>
+    <p class="modal-hint">The page the site opens on — what "/" serves, and what the thumbnail
+      shows.</p>
+    <div id="entryList" class="history-list entry-list"></div>
+    <div class="modal-actions">
+      <button id="entryClose" class="primary small">Close</button>
     </div>
   </div>
 </div>
