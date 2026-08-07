@@ -1126,6 +1126,67 @@ body.dropping .drop-hint { display: flex; }
 .toast-close:hover { color: var(--white); background: none; border-color: transparent; }
 @keyframes slide-in { from { opacity: 0; transform: translateX(20px); } }
 
+/* ---------- capture power (Phase 4) ---------- */
+/* Textareas (extra headers, the batch URL list) dress like every other input. */
+textarea {
+  font: inherit;
+  color: var(--white);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 12px;
+  outline: none;
+  resize: vertical;
+  transition: border-color .18s var(--e), background .18s var(--e);
+}
+textarea::placeholder { color: var(--faint); }
+textarea:focus { border-color: var(--line-2); background: var(--surface-3); }
+#captureHeaders { display: block; width: min(420px, 100%); margin-top: 6px; font-family: var(--mono); font-size: 12px; }
+#batchUrls { display: block; width: 100%; margin-top: 4px; font-family: var(--mono); font-size: 12px; line-height: 1.7; }
+
+/* "Capture signed in" sits next to its own action button. */
+.opt-with-btn { display: flex; align-items: center; gap: 12px; }
+.opt-with-btn label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+
+/* A label whose control sits beside further chrome (a Browse button, a unit). */
+.opt-main .row { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-weight: 400; }
+.opt-main .row button { flex: none; }
+/* A label whose control is a block underneath (the headers textarea). */
+.opt-main.opt-stack { display: block; }
+
+/* Scope row: three labelled fields stacked, sharing one help sentence. */
+#scopeRow .opt-main { margin-bottom: 8px; }
+#scopeRow input[type="text"] { width: 300px; }
+#scopeRow input[type="number"] { width: 84px; padding: 5px 10px; font-size: 13px; font-weight: 400; }
+#cookiesFile { width: 300px; }
+
+/* The capture queue inside the run panel: what's waiting, in order, each row
+   removable on its own. */
+.run-queue {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--void);
+  padding: 8px 12px;
+  margin-bottom: 10px;
+}
+.run-queue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--dim);
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-bottom: 4px;
+}
+.queue-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; border-top: 1px solid var(--line); }
+.queue-row:first-child { border-top: none; }
+.queue-pos { color: var(--faint); font-family: var(--mono); font-size: 11.5px; width: 16px; text-align: right; flex: none; }
+.queue-url { flex: 1; color: var(--gray); font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-row .icon-btn { width: 26px; height: 26px; }
+.queue-row .icon-btn svg { width: 13px; height: 13px; }
+
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb { background: #2C2C33; border-radius: 99px; }
 ::-webkit-scrollbar-thumb:hover { background: #3C3C45; }

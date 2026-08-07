@@ -30,7 +30,9 @@ if (process.argv.includes('--mcp')) {
 const log = require('./lib/logger');
 const settings = require('./lib/settings');
 const browsers = require('./lib/browsers');
-const { captureSite, findSingleFile, nameFromUrl, normalizeUrl, writeManifest, readManifest } = require('./lib/capture');
+const { captureSite, findSingleFile, nameFromUrl, normalizeUrl, writeManifest, readManifest,
+  parseUrlList, parseHeaderLines, filterByGlobs } = require('./lib/capture');
+const { isSitemapUrl, fetchSitemapUrls } = require('./lib/sitemap');
 const { extractSite, uniqueOutDir } = require('./lib/extract');
 const { HostManager } = require('./lib/server');
 const { TunnelManager } = require('./lib/tunnel');
@@ -509,12 +511,94 @@ async function environment() {
 }
 
 // ---------- pipelines ----------
+// The separate browser profile captures sign in with. "Log in for capture…"
+// opens a headed browser on it once; every capture with "signed in" on reuses
+// it. Never the user's own browser profile.
+const captureProfileDir = () => path.join(app.getPath('userData'), 'capture-profile');
+
+/** What the renderer sent, resolved against settings (which clamp on save) and
+ *  in the exact shape captureSite and the manifest's captureOptions store. */
+function resolveCaptureOptions(opts) {
+  // Round-trip the remembered options through settings so every value is
+  // clamped/sanitized by the one place that knows how (invariant 6).
+  const saved = settings.save({
+    crawl: !!opts.crawl, depth: opts.depth, mobile: !!opts.mobile,
+    fixVideos: opts.fixVideos !== false, headless: opts.headless !== false,
+    stripBanners: !!opts.stripBanners, waitDelay: opts.waitDelay || 0,
+    scrollPage: !!opts.scrollPage, useProfile: !!opts.useProfile,
+    cookiesFile: typeof opts.cookiesFile === 'string' ? opts.cookiesFile.trim() : '',
+    captureHeaders: typeof opts.captureHeaders === 'string' ? opts.captureHeaders : '',
+    includeGlobs: typeof opts.includeGlobs === 'string' ? opts.includeGlobs : '',
+    excludeGlobs: typeof opts.excludeGlobs === 'string' ? opts.excludeGlobs : '',
+    maxPages: opts.maxPages,
+  });
+  return {
+    crawl: saved.crawl, depth: saved.depth, mobile: saved.mobile,
+    fixVideos: saved.fixVideos, headless: saved.headless,
+    stripBanners: saved.stripBanners, waitDelay: saved.waitDelay,
+    scrollPage: saved.scrollPage, useProfile: saved.useProfile,
+    cookiesFile: saved.cookiesFile, headers: parseHeaderLines(saved.captureHeaders),
+    include: saved.includeGlobs, exclude: saved.excludeGlobs,
+    maxPages: saved.maxPages, sitemap: !!opts.sitemap,
+  };
+}
+
+/** A stored captureOptions block (from siteslurp.json) back into the shape
+ *  resolveCaptureOptions produces — with legacy manifests falling back to the
+ *  few fields they did record. */
+function captureOptionsFrom(manifest) {
+  const current = settings.load();
+  const co = manifest.captureOptions || {};
+  const pick = (key, legacy, fallback) => {
+    if (co[key] !== undefined) return co[key];
+    if (legacy !== undefined) return legacy;
+    return fallback;
+  };
+  return {
+    crawl: !!pick('crawl', manifest.crawl, current.crawl),
+    depth: pick('depth', manifest.depth, current.depth),
+    mobile: !!pick('mobile', manifest.mobile, false),
+    fixVideos: pick('fixVideos', undefined, current.fixVideos) !== false,
+    headless: pick('headless', undefined, current.headless) !== false,
+    stripBanners: !!pick('stripBanners', undefined, current.stripBanners),
+    waitDelay: pick('waitDelay', undefined, 0) || 0,
+    scrollPage: !!co.scrollPage,
+    useProfile: !!co.useProfile,
+    cookiesFile: typeof co.cookiesFile === 'string' ? co.cookiesFile : '',
+    headers: Array.isArray(co.headers) ? co.headers.filter(h => typeof h === 'string').slice(0, 10) : [],
+    include: typeof co.include === 'string' ? co.include : '',
+    exclude: typeof co.exclude === 'string' ? co.exclude : '',
+    maxPages: Math.min(1000, Math.max(1, Math.round(Number(co.maxPages)) || current.maxPages)),
+    sitemap: !!co.sitemap,
+  };
+}
+
+/** Sitemap ingestion: the page list, scoped by the include/exclude globs and
+ *  cut at the page cap. Returns { urls, partial }. */
+async function sitemapPageList(url, co, signal) {
+  send('run:status', { phase: 'sitemap', msg: `Reading the sitemap at ${url}` });
+  const all = await fetchSitemapUrls(url, { signal }).catch(err => {
+    // A cancel mid-fetch surfaces as an AbortError — report it as the cancel
+    // it is, not as a sitemap failure.
+    if (signal && signal.aborted) throw Object.assign(new Error('Capture canceled.'), { canceled: true });
+    throw err;
+  });
+  const scoped = filterByGlobs(all, { include: co.include, exclude: co.exclude });
+  if (!scoped.length) {
+    throw new Error('The sitemap lists no pages that match the include/exclude patterns in Options.');
+  }
+  const urls = scoped.slice(0, co.maxPages);
+  runLog(`  sitemap: ${all.length} URL(s) listed, ${scoped.length} in scope, capturing ${urls.length}`);
+  return { urls, partial: urls.length < scoped.length };
+}
+
 async function runCapture(opts) {
   const { controller } = claimJob('A capture');
   const started = Date.now();
   try {
-    const current = settings.load();
     const url = normalizeUrl(opts.url);
+    const co = resolveCaptureOptions(opts);   // also remembers the options
+    const current = settings.load();
     const singleFilePath = findSingleFile(current.singleFilePath);
     if (!singleFilePath) throw new Error('The bundled page-capture engine is missing. Reinstall SiteSlurp.');
     const browserPath = await resolveBrowser();
@@ -523,25 +607,23 @@ async function runCapture(opts) {
     }
     fs.mkdirSync(current.capturesRoot, { recursive: true });
 
-    // Remember the options for next time.
-    settings.save({
-      crawl: !!opts.crawl, depth: opts.depth, mobile: !!opts.mobile,
-      fixVideos: opts.fixVideos !== false, headless: opts.headless !== false,
-      stripBanners: !!opts.stripBanners, waitDelay: opts.waitDelay || 0,
-    });
+    // A sitemap URL captures the pages it lists — one project, page by page,
+    // no crawling (the sitemap already is the page list).
+    let pageList = null;
+    if (co.sitemap) pageList = await sitemapPageList(url, co, controller.signal);
 
     send('run:status', { phase: 'capture', msg: `Capturing ${url}` });
-    log.info('capture start', url, JSON.stringify({ crawl: opts.crawl, depth: opts.depth, mobile: opts.mobile }));
+    log.info('capture start', url, JSON.stringify({ crawl: co.crawl, depth: co.depth, mobile: co.mobile, sitemap: co.sitemap }));
 
     const rawDir = await captureSite({
       url,
       name: opts.name || nameFromUrl(url),
-      depth: opts.depth,
-      mobile: opts.mobile,
-      crawl: opts.crawl,
-      headless: opts.headless,
-      stripBanners: opts.stripBanners,
-      waitDelay: opts.waitDelay,
+      ...co,
+      crawl: co.sitemap ? false : co.crawl,
+      urls: pageList ? pageList.urls : null,
+      partial: pageList ? pageList.partial : false,
+      profileDir: co.useProfile ? captureProfileDir() : null,
+      captureOptions: co,
       browserPath,
       singleFilePath,
       outRoot: current.capturesRoot,
@@ -560,7 +642,7 @@ async function runCapture(opts) {
     const rawManifest = readManifest(rawDir) || {};
     writeManifest(outDir, { ...rawManifest, url, name: opts.name || nameFromUrl(url), kind: 'extracted', source: rawDir });
 
-    if (opts.fixVideos !== false) {
+    if (co.fixVideos) {
       send('run:status', { phase: 'videos', msg: 'Restoring stripped videos' });
       const fixed = await versions.suppressAuto(() => fixVideos(outDir, runLog));
       if (fixed) runLog(`  restored ${fixed} video(s)`);
@@ -623,6 +705,143 @@ async function runExtract(rawDir, { overwrite = false } = {}) {
     throw err;
   } finally {
     releaseJob();
+  }
+}
+
+// ---------- capture queue ----------
+// A pasted list of URLs becomes sequential capture jobs — one browser at a
+// time (the job rule), each landing as its own project. The queue itself is
+// bookkeeping; every actual capture still goes through runCapture and the
+// job lock like a single one would.
+const captureQueue = []; // { qid, url, opts }
+let queueSeq = 0;
+let queueRunning = false;
+
+function broadcastQueue() {
+  send('run:queue', { items: captureQueue.map(item => ({ qid: item.qid, url: item.url })) });
+}
+
+async function runQueue() {
+  if (queueRunning) return;
+  queueRunning = true;
+  try {
+    while (captureQueue.length) {
+      // Another job (an audit, a re-capture) may hold the slot — wait politely
+      // instead of failing every queued item against it.
+      while (job) await new Promise(resolve => setTimeout(resolve, 500));
+      const item = captureQueue.shift();
+      if (!item) break;
+      broadcastQueue();
+      // Failures reported via run:done; a bad URL must not sink the rest.
+      try { await runCapture(item.opts); } catch { /* logged in runCapture */ }
+    }
+  } finally {
+    queueRunning = false;
+    broadcastQueue();
+  }
+}
+
+// ---------- re-capture as a version ----------
+// Re-run a capture's stored options against its source URL, into a temp
+// folder; snapshot the project as it is; swap in the fresh extract. The old
+// state stays restorable and diffable from the Versions tab.
+async function runRecapture(project) {
+  const manifest = readManifest(project.path) || {};
+  if (!manifest.url) {
+    throw new Error('This capture has no source URL recorded — capture the site fresh instead.');
+  }
+  const co = captureOptionsFrom(manifest);
+  const { controller } = claimJob('A re-capture');
+  const started = Date.now();
+  let tmpRoot = null;
+  try {
+    const current = settings.load();
+    const singleFilePath = findSingleFile(current.singleFilePath);
+    if (!singleFilePath) throw new Error('The bundled page-capture engine is missing. Reinstall SiteSlurp.');
+    const browserPath = await resolveBrowser();
+    if (!browserPath) {
+      throw new Error('No Chromium browser found. Install Google Chrome or Microsoft Edge, then set it in Settings.');
+    }
+
+    let pageList = null;
+    if (co.sitemap) pageList = await sitemapPageList(manifest.url, co, controller.signal);
+
+    // The fresh capture lands in a temp folder; the project's files are only
+    // touched in the swap step below, after the snapshot exists.
+    tmpRoot = fs.mkdtempSync(path.join(app.getPath('temp'), 'slurp-recapture-'));
+    send('run:status', { phase: 'capture', msg: `Re-capturing ${manifest.url}` });
+    log.info('recapture start', project.path, manifest.url);
+
+    const rawDir = await captureSite({
+      url: manifest.url,
+      name: manifest.name || project.name || nameFromUrl(manifest.url),
+      ...co,
+      crawl: co.sitemap ? false : co.crawl,
+      urls: pageList ? pageList.urls : null,
+      partial: pageList ? pageList.partial : false,
+      profileDir: co.useProfile ? captureProfileDir() : null,
+      captureOptions: co,
+      browserPath,
+      singleFilePath,
+      outRoot: tmpRoot,
+      signal: controller.signal,
+    }, runLog);
+    if (controller.signal.aborted) throw Object.assign(new Error('Re-capture canceled.'), { canceled: true });
+
+    send('run:status', { phase: 'extract', msg: 'Extracting into editable files' });
+    const outDir = uniqueOutDir(rawDir + '_extracted');
+    const stats = await versions.suppressAuto(() => extractSite(rawDir, outDir, {
+      signal: controller.signal,
+      onProgress: p => send('run:progress', p),
+    }, runLog));
+    runLog(`  ${stats.pages} pages | ${stats.css} css | ${stats.images} images | ${stats.fonts} fonts`);
+    // The fresh tree carries its own finished manifest into the swap, so the
+    // project is never a mix of new files and an old manifest. `source` keeps
+    // pointing at the original raw snapshot (the temp one is about to go).
+    const rawManifest = readManifest(rawDir) || {};
+    writeManifest(outDir, {
+      ...rawManifest,
+      url: manifest.url,
+      name: manifest.name || project.name,
+      kind: 'extracted',
+      ...(manifest.source ? { source: manifest.source } : {}),
+    });
+
+    send('run:status', { phase: 'snapshot', msg: 'Snapshotting the current version' });
+    const snap = await versions.createSnapshot(project, { source: 'capture', label: 'Before re-capture' });
+    if (!snap.unchanged) runLog(`  snapshotted the current version (${snap.id})`);
+
+    send('run:status', { phase: 'replace', msg: 'Swapping in the fresh capture' });
+    const swapped = await versions.replaceTree(project, outDir);
+    runLog(`  swapped in ${swapped.copied} file(s)`);
+
+    if (co.fixVideos) {
+      send('run:status', { phase: 'videos', msg: 'Restoring stripped videos' });
+      const fixed = await versions.suppressAuto(() => fixVideos(project.path, runLog)).catch(() => 0);
+      if (fixed) runLog(`  restored ${fixed} video(s)`);
+    }
+
+    send('run:status', { phase: 'thumb', msg: 'Rendering preview' });
+    await makeThumb(project.path);
+
+    invalidate(project.path);
+    const seconds = Math.round((Date.now() - started) / 1000);
+    log.info('recapture done', project.path, `${seconds}s`, JSON.stringify(stats));
+    send('run:done', { ok: true, recapture: true, dir: project.path, stats, seconds });
+    send('ui:refresh');
+    return project.path;
+  } catch (err) {
+    if (err.canceled) {
+      log.info('recapture canceled');
+      send('run:done', { ok: false, recapture: true, canceled: true, error: 'Re-capture canceled.' });
+    } else {
+      log.error('recapture failed', err);
+      send('run:done', { ok: false, recapture: true, error: err.message });
+    }
+    throw err;
+  } finally {
+    releaseJob();
+    if (tmpRoot) fs.promises.rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -1150,16 +1369,107 @@ function registerIpc() {
   });
 
   handle('capture:start', opts => {
-    // Validate before returning so the UI can show input errors immediately.
-    normalizeUrl(opts.url);
-    runCapture(opts).catch(() => {});
-    return true;
+    // The URL box takes one URL, a list of URLs, or a sitemap.xml link.
+    // Validate everything before returning so input errors surface immediately.
+    const urls = parseUrlList(opts.url);
+    if (!urls.length) throw new Error('Enter a URL to capture.');
+    for (const url of urls) normalizeUrl(url);
+    if (urls.length > 1 && urls.some(isSitemapUrl)) {
+      throw new Error('Capture a sitemap on its own — it already expands into its pages.');
+    }
+    for (const url of urls) {
+      captureQueue.push({
+        qid: ++queueSeq,
+        url,
+        opts: { ...opts, url, sitemap: isSitemapUrl(url) },
+      });
+    }
+    broadcastQueue();
+    runQueue();
+    return { queued: urls.length };
   });
 
   handle('capture:cancel', () => {
     if (!job) return false;
     job.controller.abort();
     return true;
+  });
+
+  // Per-item queue cancel; 'all' empties everything still waiting. The one
+  // currently capturing is capture:cancel's business, not the queue's.
+  handle('capture:dequeue', ({ qid }) => {
+    if (qid === 'all') {
+      captureQueue.length = 0;
+    } else {
+      const index = captureQueue.findIndex(item => item.qid === qid);
+      if (index === -1) return false;
+      captureQueue.splice(index, 1);
+    }
+    broadcastQueue();
+    return true;
+  });
+
+  // "Log in for capture…": a headed browser on the persistent capture profile.
+  // Sign in, close the window, done — the profile keeps the session and every
+  // "signed in" capture reuses it. Holds the job slot while open: the profile
+  // is locked by the browser, and a capture against it would fail anyway.
+  handle('capture:login', async ({ url }) => {
+    const browserPath = await resolveBrowser();
+    if (!browserPath) {
+      throw new Error('No Chromium browser found. Install Google Chrome or Microsoft Edge, then set it in Settings.');
+    }
+    const target = url && String(url).trim() ? normalizeUrl(url) : 'about:blank';
+    const profile = captureProfileDir();
+    fs.mkdirSync(profile, { recursive: true });
+    claimJob('The capture sign-in browser');
+    log.info('capture login browser opened', profile);
+    try {
+      await new Promise((resolve, reject) => {
+        // A real browser child, not a node one: strip the Electron env vars
+        // that change how a spawned Chromium behaves (invariant 13).
+        const env = { ...process.env };
+        for (const key of ['ELECTRON_RUN_AS_NODE', 'ELECTRON_NO_ATTACH_CONSOLE', 'NODE_OPTIONS']) delete env[key];
+        const child = spawn(browserPath, [
+          `--user-data-dir=${profile}`,
+          '--no-first-run',
+          '--no-default-browser-check',
+          target,
+        ], { windowsHide: false, stdio: 'ignore', env });
+        child.on('error', err => reject(new Error(`Could not start the browser: ${err.message}`)));
+        child.on('close', () => resolve());
+      });
+    } finally {
+      releaseJob();
+    }
+    // From here on, "signed in" is what the user set this profile up for.
+    settings.save({ useProfile: true });
+    log.info('capture login browser closed');
+    return { profile };
+  });
+
+  // Re-capture: same options, fresh content, previous state kept as a snapshot.
+  handle('capture:recapture', ({ id }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    assertInRoot(project.path, 'The site folder');
+    const manifest = readManifest(project.path) || {};
+    if (!manifest.url) {
+      throw new Error('This capture has no source URL recorded — capture the site fresh instead.');
+    }
+    runRecapture(project).catch(() => {});
+    return true;
+  });
+
+  handle('settings:browseCookies', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Choose a cookies file (Netscape cookies.txt or JSON)',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Cookie files', extensions: ['txt', 'json'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    return res.canceled ? null : res.filePaths[0];
   });
 
   handle('extract:run', async ({ dir, overwrite }) => {
@@ -1739,6 +2049,7 @@ if (!app.requestSingleInstanceLock()) {
   }).catch(err => onFatal('startup', err));
 
   app.on('before-quit', () => {
+    captureQueue.length = 0; // a quitting app must not start the next queued capture
     if (job) job.controller.abort();
     tunnels.stopAll();
     hosts.stopAll();

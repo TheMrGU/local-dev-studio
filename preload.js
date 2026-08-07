@@ -21,7 +21,8 @@ const INVOKE = new Set([
   'audit:run',
   'calibration:promote', 'calibration:get', 'calibration:update',
   'calibration:removeAnchor', 'calibration:removePreference',
-  'capture:start', 'capture:cancel',
+  'capture:start', 'capture:cancel', 'capture:dequeue', 'capture:login', 'capture:recapture',
+  'settings:browseCookies',
   'extract:run',
   'host:start', 'host:stop', 'host:stopAll',
   'share:start', 'share:stop', 'share:state',
@@ -35,7 +36,7 @@ const INVOKE = new Set([
 ]);
 
 const EVENTS = new Set([
-  'run:log', 'run:status', 'run:progress', 'run:done', 'run:busy', 'runtime:state',
+  'run:log', 'run:status', 'run:progress', 'run:done', 'run:busy', 'run:queue', 'runtime:state',
   'share:state', 'share:download',
   'zip:progress', 'env:changed', 'review:exported', 'review:promote',
   'ui:refresh', 'ui:settings', 'ui:focus-url',

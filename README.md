@@ -29,8 +29,15 @@ inside the app and runs on Electron's own runtime.
 
 1. **Capture** — drives a real browser, so React / Next / SPA sites fully render before they're
    saved. Whole-site crawl (depth 1–5) or a single page; desktop or emulated mobile device.
-   Optionally strips cookie-consent overlays, and can run the browser visibly for sites that
-   block headless automation.
+   Optionally strips cookie-consent overlays, scrolls the page first so lazy-loaded content
+   makes it in, and can run the browser visibly for sites that block headless automation.
+   Pages behind a login capture too: **Log in for capture…** opens a browser profile kept just
+   for capturing — sign in once and every "signed in" capture reuses the session — or hand it a
+   `cookies.txt`/JSON cookie export and extra request headers (staging basic-auth). Paste a
+   list of URLs to queue captures one after another, or paste a `sitemap.xml` link to capture
+   every page it lists into one project — scoped by include/exclude path patterns and a page
+   cap. Later, **⋯ → Re-capture from the web…** runs the same capture again and keeps the old
+   state as a snapshot, so "what changed on this site since May" is one diff away.
 2. **Extract** — explodes the self-contained snapshot into an editable structure:
    `*.html` + `css/` (one file per unique style block) + `assets/images|fonts|media|misc/`,
    deduped by content hash across pages. Scroll-reveal content frozen at `opacity: 0` (its

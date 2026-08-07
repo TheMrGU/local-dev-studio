@@ -35,7 +35,9 @@ const runtimes = require('../lib/runtimes');
 const { portAnswers, AttachRunner } = require('../lib/runner');
 const { CHECKLISTS } = require('../lib/checklists');
 const { resolveEntry } = require('../lib/entry');
-const { normalizeUrl, nameFromUrl, reserveCaptureDir } = require('../lib/capture');
+const { normalizeUrl, nameFromUrl, reserveCaptureDir, writeManifest, readManifest,
+  parseUrlList, parseHeaderLines, crawlScopeRules, filterByGlobs, buildArgs } = require('../lib/capture');
+const { isSitemapUrl, parseSitemap, fetchSitemapUrls } = require('../lib/sitemap');
 const versions = require('../lib/versions');
 const { watchFolder } = require('../lib/watch');
 const settings = require('../lib/settings');
@@ -2455,6 +2457,179 @@ async function agentTests() {
   }
 }
 
+/* ---------------- capture power (Phase 4) ---------------- */
+async function capturePowerTests() {
+  console.log('\ncapture power');
+
+  await check('a pasted blob becomes a clean URL list', () => {
+    eq(parseUrlList('https://a.com\n\n https://b.com/x \nhttps://a.com\n# note\nhttps://c.com, https://d.com'),
+      ['https://a.com', 'https://b.com/x', 'https://c.com', 'https://d.com']);
+    eq(parseUrlList(''), []);
+    eq(parseUrlList('  \n # only noise \n'), []);
+    // Commas are legal inside a URL — a single URL never gets cut in half.
+    eq(parseUrlList('https://a.com/page,with,commas'), ['https://a.com/page,with,commas']);
+  });
+
+  await check('header lines are validated into --http-header values', () => {
+    eq(parseHeaderLines('Authorization: Basic abc\nnot a header\nX-Env: staging\n\n'),
+      ['Authorization: Basic abc', 'X-Env: staging']);
+    eq(parseHeaderLines(''), []);
+    eq(parseHeaderLines(': no name'), []);
+  });
+
+  await check('crawl scope rules follow the CLI\'s rewrite semantics', () => {
+    // Replicates single-file-cli's rewriteURL (single-file-cli-api.js): rules
+    // are "<regex> <replacement>" split on spaces, and a URL rewritten to
+    // nothing is skipped by the crawler.
+    const rewrite = (url, rules) => {
+      for (const rule of rules) {
+        const parts = rule.trim().split(/ +/);
+        url = url.replace(new RegExp(parts[0]), parts[1] || '').trim();
+      }
+      return url;
+    };
+    const excl = crawlScopeRules({ exclude: '/tag/*, /search' });
+    eq(rewrite('https://site.com/tag/red', excl), '');
+    eq(rewrite('https://site.com/search', excl), '');
+    eq(rewrite('https://site.com/search?q=x', excl), '');
+    eq(rewrite('https://site.com/blog/post', excl), 'https://site.com/blog/post');
+    eq(rewrite('https://site.com/searching', excl), 'https://site.com/searching', 'no prefix bleed: ');
+    const incl = crawlScopeRules({ include: 'docs/*' }); // leading slash implied
+    eq(rewrite('https://site.com/docs/intro', incl), 'https://site.com/docs/intro');
+    eq(rewrite('https://site.com/docs/deep/page?x=1', incl), 'https://site.com/docs/deep/page?x=1');
+    eq(rewrite('https://site.com/pricing', incl), '');
+    // A glob with a space would corrupt the space-separated rule — dropped.
+    eq(crawlScopeRules({ exclude: '/has space/*' }), []);
+    eq(crawlScopeRules({}), []);
+  });
+
+  await check('sitemap page lists post-filter through the same globs', () => {
+    const urls = ['https://s.com/', 'https://s.com/docs/a', 'https://s.com/tag/x', 'https://s.com/docs/b?y=1'];
+    eq(filterByGlobs(urls, { include: '/docs/*' }), ['https://s.com/docs/a', 'https://s.com/docs/b?y=1']);
+    eq(filterByGlobs(urls, { exclude: '/tag/*' }), ['https://s.com/', 'https://s.com/docs/a', 'https://s.com/docs/b?y=1']);
+    eq(filterByGlobs(urls, {}), urls);
+    eq(filterByGlobs(['not a url'], { include: '/docs/*' }), []);
+  });
+
+  await check('buildArgs turns the new options into the CLI flags that exist', () => {
+    const args = buildArgs({
+      url: 'https://site.com/', crawl: true, depth: 2, browserPath: 'chrome.exe', singleFilePath: 'sf.js',
+      profileDir: 'C:\\prof', cookiesFile: 'C:\\cookies.txt', headers: ['X-A: 1', 'X-B: 2'],
+      scrollPage: true, include: '', exclude: '/tag/*',
+    }, 'C:\\out');
+    ok(args.includes('--browser-arg=--user-data-dir=C:\\prof'), 'profile rides in as a browser arg');
+    ok(args.includes('--browser-cookies-file=C:\\cookies.txt'), 'cookie file flag');
+    ok(args.includes('--http-header=X-A: 1') && args.includes('--http-header=X-B: 2'), 'headers repeat');
+    ok(args.includes('--load-deferred-images-dispatch-scroll-event=true'), 'scroll flag');
+    ok(args.includes('--load-deferred-images-max-idle-time=10000'), 'scroll mode waits longer');
+    ok(args.some(a => a.startsWith('--crawl-rewrite-rule=')), 'scope rules attached to the crawl');
+
+    const plain = buildArgs({ url: 'https://site.com/', browserPath: 'c', singleFilePath: 'sf' }, 'C:\\out');
+    ok(!plain.some(a => a.includes('user-data-dir')), 'no profile unless asked');
+    ok(plain.includes('--load-deferred-images-max-idle-time=3000'), 'default idle time without scroll');
+
+    // Page-list mode (sitemap): one browser worker, no positional URL, no crawl.
+    const list = buildArgs({ url: 'https://site.com/', crawl: true, urlsFile: 'C:\\u.txt',
+      browserPath: 'c', singleFilePath: 'sf' }, 'C:\\out');
+    ok(list.includes('--urls-file=C:\\u.txt'), 'urls file flag');
+    ok(list.includes('--max-parallel-workers=1'), 'one browser at a time');
+    ok(!list.includes('https://site.com/'), 'no positional URL in list mode');
+    ok(!list.includes('--crawl-links=true'), 'a page list never crawls');
+  });
+
+  await check('sitemap parsing handles urlsets, indexes, CDATA and entities', () => {
+    const urlset = parseSitemap('<?xml version="1.0"?><urlset><url><loc> https://s.com/a </loc></url>'
+      + '<url><loc><![CDATA[https://s.com/b?x=1&amp;y=2]]></loc></url>'
+      + '<url><loc>ftp://nope</loc></url></urlset>');
+    eq(urlset.kind, 'urlset');
+    eq(urlset.urls, ['https://s.com/a', 'https://s.com/b?x=1&y=2']);
+    const index = parseSitemap('<sitemapindex><sitemap><loc>https://s.com/a.xml</loc></sitemap></sitemapindex>');
+    eq(index.kind, 'index');
+    eq(index.urls, ['https://s.com/a.xml']);
+    eq(parseSitemap('not xml at all').urls, []);
+  });
+
+  await check('isSitemapUrl spots sitemap links and nothing else', () => {
+    ok(isSitemapUrl('https://s.com/sitemap.xml'));
+    ok(isSitemapUrl('https://s.com/sitemap_index.xml'));
+    ok(isSitemapUrl('https://s.com/wp-sitemap.xml'));
+    ok(!isSitemapUrl('https://s.com/feed.xml'), 'an .xml feed is not a sitemap');
+    ok(!isSitemapUrl('https://s.com/sitemap'), 'needs the .xml');
+    ok(!isSitemapUrl('not a url'));
+  });
+
+  await check('fetchSitemapUrls follows an index one level, dedupes and caps', async () => {
+    const docs = {
+      'https://s.com/sitemap.xml': '<sitemapindex><sitemap><loc>https://s.com/a.xml</loc></sitemap>'
+        + '<sitemap><loc>https://s.com/broken.xml</loc></sitemap>'
+        + '<sitemap><loc>https://s.com/b.xml</loc></sitemap></sitemapindex>',
+      'https://s.com/a.xml': '<urlset><url><loc>https://s.com/one</loc></url>'
+        + '<url><loc>https://s.com/two#frag</loc></url></urlset>',
+      'https://s.com/b.xml': '<urlset><url><loc>https://s.com/two</loc></url>'
+        + '<url><loc>https://s.com/three</loc></url></urlset>',
+    };
+    const fetchText = async url => {
+      if (!docs[url]) throw new Error('404');
+      return docs[url];
+    };
+    const urls = await fetchSitemapUrls('https://s.com/sitemap.xml', { fetchText });
+    eq(urls, ['https://s.com/one', 'https://s.com/two', 'https://s.com/three']);
+    const capped = await fetchSitemapUrls('https://s.com/sitemap.xml', { fetchText, limit: 2 });
+    eq(capped, ['https://s.com/one', 'https://s.com/two']);
+    await throws(() => fetchSitemapUrls('https://s.com/a.xml', {
+      fetchText: async () => '<urlset></urlset>',
+    }), 'an empty sitemap is an error, not an empty capture');
+  });
+
+  await check('captureOptions and the partial flag round-trip through the manifest', () => {
+    const dir = scratch('cap-manifest');
+    const co = {
+      crawl: true, depth: 3, mobile: false, fixVideos: true, headless: true, stripBanners: true,
+      waitDelay: 0, scrollPage: true, useProfile: true, cookiesFile: '', headers: ['X-A: 1'],
+      include: '/docs/*', exclude: '', maxPages: 50, sitemap: false,
+    };
+    writeManifest(dir, { url: 'https://x.com', name: 'x', kind: 'raw', captureOptions: co, partial: true });
+    const read = readManifest(dir);
+    eq(read.captureOptions, co);
+    eq(read.partial, true);
+    eq(read.url, 'https://x.com');
+  });
+
+  await check('replaceTree swaps the working files and the old state stays in its snapshot', async () => {
+    const capDir = scratch('recap-site');
+    fs.writeFileSync(path.join(capDir, 'index.html'), '<h1>old</h1>');
+    fs.writeFileSync(path.join(capDir, 'stale.html'), 'stale page');
+    projectsReg.syncCaptures([{ dir: capDir, name: 'recap-site' }]);
+    const project = projectsReg.byPath(capDir);
+    // The re-capture order: snapshot first, then swap.
+    await versions.createSnapshot(project, { source: 'capture', label: 'Before re-capture' });
+    const fresh = scratch('recap-fresh');
+    fs.writeFileSync(path.join(fresh, 'index.html'), '<h1>new</h1>');
+    fs.mkdirSync(path.join(fresh, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(fresh, 'assets', 'a.css'), 'body{}');
+    const swapped = await versions.replaceTree(project, fresh);
+    eq(swapped.copied, 2);
+    eq(swapped.removed, 1);
+    eq(fs.readFileSync(path.join(capDir, 'index.html'), 'utf8'), '<h1>new</h1>');
+    ok(!fs.existsSync(path.join(capDir, 'stale.html')), 'file the fresh tree lacks is gone');
+    ok(fs.existsSync(path.join(capDir, 'assets', 'a.css')), 'new files copied in');
+    // The snapshot store survived the swap and still holds the old state.
+    const snap = versions.listSnapshots(project)[0];
+    eq(snap.source, 'capture');
+    eq((await versions.readFileAt(project, snap.id, 'index.html')).toString(), '<h1>old</h1>');
+    eq((await versions.readFileAt(project, snap.id, 'stale.html')).toString(), 'stale page');
+    // An empty fresh tree must never wipe a site.
+    await throws(() => versions.replaceTree(project, scratch('recap-empty')), 'empty fresh tree refused');
+    eq(fs.readFileSync(path.join(capDir, 'index.html'), 'utf8'), '<h1>new</h1>', 'nothing was deleted: ');
+  });
+
+  await check('the crawl page cap is a clamped setting', () => {
+    eq(settings.save({ maxPages: 99999 }).maxPages, 1000);
+    eq(settings.save({ maxPages: 0 }).maxPages, 1);
+    eq(settings.save({ maxPages: 100 }).maxPages, 100);
+  });
+}
+
 /* ---------------- run ---------------- */
 (async () => {
   console.log(`SiteSlurp checks  (scratch: ${TMP})`);
@@ -2479,6 +2654,7 @@ async function agentTests() {
   await agentTests();
   await versionTests();
   await pinnedServingTests();
+  await capturePowerTests();
   await miscTests();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

@@ -148,9 +148,57 @@
         </div>
 
         <div class="opt-row">
+          <label class="opt-main"><input type="checkbox" id="scrollPage"> Scroll the page before saving</label>
+          <p class="opt-help">Simulates scrolling so lazy-loaded images and sections finish loading
+            before the snapshot. Turn on when a page only fills in as you scroll.</p>
+        </div>
+
+        <div class="opt-row">
           <label class="opt-main"><input type="checkbox" id="showBrowser"> Show the browser while capturing</label>
           <p class="opt-help">Runs the capture in a visible window instead of in the background. Useful
             for sites that block bots, or when you need to log in or dismiss something by hand.</p>
+        </div>
+
+        <div class="opt-row">
+          <div class="opt-main opt-with-btn">
+            <label><input type="checkbox" id="useProfile"> Capture signed in</label>
+            <button type="button" id="btnLogin" class="small">Log in for capture&hellip;</button>
+          </div>
+          <p class="opt-help">Captures with a separate browser profile kept just for this, so pages
+            behind a login save the way you see them. Click "Log in for capture", sign in to the site
+            in the window that opens, then close it — the login sticks for future captures.</p>
+        </div>
+
+        <div class="opt-row">
+          <label class="opt-main" for="cookiesFile">Cookies file
+            <span class="row"><input id="cookiesFile" type="text" spellcheck="false" placeholder="none">
+            <button type="button" id="btnCookies" class="small">Browse</button></span>
+          </label>
+          <p class="opt-help">A cookies.txt (Netscape) or JSON cookie export, loaded into the capture
+            browser so pages open with those cookies. Clear the box to stop using it.</p>
+        </div>
+
+        <div class="opt-row">
+          <label class="opt-main opt-stack" for="captureHeaders">Extra request headers
+            <textarea id="captureHeaders" rows="2" spellcheck="false" placeholder="Authorization: Basic …"></textarea>
+          </label>
+          <p class="opt-help">One "Name: value" per line, sent with every request — for staging sites
+            behind basic auth or custom gates.</p>
+        </div>
+
+        <div class="opt-row" id="scopeRow">
+          <label class="opt-main" for="includeGlobs">Only capture pages matching
+            <input id="includeGlobs" type="text" spellcheck="false" placeholder="all pages — e.g. /docs/*, /blog/*">
+          </label>
+          <label class="opt-main" for="excludeGlobs">Skip pages matching
+            <input id="excludeGlobs" type="text" spellcheck="false" placeholder="nothing — e.g. /tag/*, /search">
+          </label>
+          <label class="opt-main" for="maxPages">Stop after
+            <span class="row"><input id="maxPages" type="number" min="1" max="1000"> pages</span>
+          </label>
+          <p class="opt-help">Patterns match the page path; * stands for anything, commas separate
+            several. They scope whole-site crawls and sitemap captures. The page cap stops a runaway
+            crawl cleanly — everything captured up to it is kept and marked partial.</p>
         </div>
 
         <div class="opt-row">
@@ -181,6 +229,13 @@
         <span id="runStatus">Starting…</span>
         <span id="runElapsed" class="run-elapsed"></span>
         <button id="btnCancel" class="small ghost">Cancel</button>
+      </div>
+      <div id="runQueue" class="run-queue hidden">
+        <div class="run-queue-head">
+          <span>Up next</span>
+          <button id="queueClear" class="small ghost">Clear the queue</button>
+        </div>
+        <div id="queueList"></div>
       </div>
       <pre id="runLog" tabindex="0"></pre>
     </div>
@@ -391,6 +446,21 @@
     <div class="modal-actions">
       <button id="attachCancel" class="small">Cancel</button>
       <button id="attachSave" class="primary small">Connect</button>
+    </div>
+  </div>
+</div>
+
+<!-- Batch capture: a list of URLs into the sequential capture queue. -->
+<div id="batchModal" class="modal hidden">
+  <div class="modal-card">
+    <h3>Capture a list of URLs</h3>
+    <p class="modal-hint">One link per line — each becomes its own capture, run one at a time. Paste a
+      single sitemap.xml link instead and every page it lists is captured into one project. The
+      Options panel's settings apply to each capture.</p>
+    <textarea id="batchUrls" rows="8" spellcheck="false" placeholder="https://site-one.com&#10;https://site-two.com/pricing&#10;https://site-three.com"></textarea>
+    <div class="modal-actions">
+      <button id="batchCancel" class="small">Cancel</button>
+      <button id="batchStart" class="primary small">Queue captures</button>
     </div>
   </div>
 </div>

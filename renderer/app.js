@@ -283,6 +283,13 @@ function applyRememberedOptions(settings) {
   $('#stripBanners').checked = settings.stripBanners;
   $('#showBrowser').checked = !settings.headless;
   $('#waitDelay').value = String(settings.waitDelay || 0);
+  $('#scrollPage').checked = !!settings.scrollPage;
+  $('#useProfile').checked = !!settings.useProfile;
+  $('#cookiesFile').value = settings.cookiesFile || '';
+  $('#captureHeaders').value = settings.captureHeaders || '';
+  $('#includeGlobs').value = settings.includeGlobs || '';
+  $('#excludeGlobs').value = settings.excludeGlobs || '';
+  $('#maxPages').value = String(settings.maxPages || 100);
   syncOptions();
 }
 
@@ -292,11 +299,20 @@ function syncOptions() {
   const crawl = $('#crawl').checked;
   const bits = [crawl ? `whole site, depth ${$('#depth').value}` : 'single page'];
   bits.push($('#mobile').checked ? 'mobile' : 'desktop');
+  if ($('#useProfile').checked) bits.push('signed in');
+  if ($('#cookiesFile').value.trim()) bits.push('cookies file');
+  if ($('#captureHeaders').value.trim()) bits.push('extra headers');
+  if ($('#scrollPage').checked) bits.push('scrolled first');
   if ($('#fixVideos').checked) bits.push('videos restored');
   if ($('#stripBanners').checked) bits.push('banners stripped');
   if ($('#showBrowser').checked) bits.push('browser visible');
   const wait = parseInt($('#waitDelay').value, 10) || 0;
   if (wait) bits.push(`${wait / 1000}s wait`);
+  if (crawl) {
+    if ($('#includeGlobs').value.trim() || $('#excludeGlobs').value.trim()) bits.push('scoped');
+    const cap = parseInt($('#maxPages').value, 10) || 100;
+    bits.push(`max ${cap} pages`);
+  }
   const name = $('#siteName').value.trim();
   if (name) bits.push(`saved as "${name}"`);
   $('#optsSummary').textContent = bits.join('  ·  ');
@@ -304,9 +320,35 @@ function syncOptions() {
   // Depth is meaningless on a single-page capture — show it that way.
   $('#depthRow').classList.toggle('off', !crawl);
   $('#depth').disabled = !crawl;
+  // Scope applies to crawls and sitemap captures — dim it only for plain
+  // single-page grabs, where there is nothing to scope.
+  $('#scopeRow').classList.toggle('off', !crawl);
+}
+
+/** Everything the Options panel says, in the shape capture:start expects. */
+function captureOptionsPayload() {
+  return {
+    crawl: $('#crawl').checked,
+    depth: parseInt($('#depth').value, 10),
+    mobile: $('#mobile').checked,
+    fixVideos: $('#fixVideos').checked,
+    stripBanners: $('#stripBanners').checked,
+    headless: !$('#showBrowser').checked,
+    waitDelay: parseInt($('#waitDelay').value, 10) || 0,
+    scrollPage: $('#scrollPage').checked,
+    useProfile: $('#useProfile').checked,
+    cookiesFile: $('#cookiesFile').value.trim(),
+    captureHeaders: $('#captureHeaders').value,
+    includeGlobs: $('#includeGlobs').value.trim(),
+    excludeGlobs: $('#excludeGlobs').value.trim(),
+    maxPages: parseInt($('#maxPages').value, 10) || 100,
+  };
 }
 
 $('#options').addEventListener('change', syncOptions);
+// Text fields (globs, headers, cookies path) update the summary as you type,
+// not just on blur.
+$('#options').addEventListener('input', syncOptions);
 $('#siteName').addEventListener('input', syncOptions);
 
 $('#btnOptions').addEventListener('click', () => {
@@ -315,27 +357,109 @@ $('#btnOptions').addEventListener('click', () => {
   $('#btnOptions').setAttribute('aria-expanded', String(open));
 });
 
+async function startCaptures(urlText) {
+  startRunPanel('Starting…');
+  try {
+    const { queued } = await invoke('capture:start', {
+      url: urlText,
+      name: $('#siteName').value.trim() || undefined,
+      ...captureOptionsPayload(),
+    });
+    if (queued > 1) toast(`Queued ${queued} captures — they run one at a time`, { kind: 'ok', timeout: 5000 });
+    return true;
+  } catch (err) {
+    stopRunPanel('fail', err.message);
+    failed(err);
+    return false;
+  }
+}
+
 $('#captureForm').addEventListener('submit', async e => {
   e.preventDefault();
   const url = $('#url').value.trim();
   if (!url) return;
-  startRunPanel('Starting…');
-  try {
-    await invoke('capture:start', {
-      url,
-      name: $('#siteName').value.trim() || undefined,
-      crawl: $('#crawl').checked,
-      depth: parseInt($('#depth').value, 10),
-      mobile: $('#mobile').checked,
-      fixVideos: $('#fixVideos').checked,
-      stripBanners: $('#stripBanners').checked,
-      headless: !$('#showBrowser').checked,
-      waitDelay: parseInt($('#waitDelay').value, 10) || 0,
-    });
-  } catch (err) {
-    stopRunPanel('fail', err.message);
-    failed(err);
+  await startCaptures(url);
+});
+
+/* A multi-line paste into the URL box is a list of captures — hand it to the
+   batch panel instead of letting the input flatten it into garbage. */
+$('#url').addEventListener('paste', e => {
+  const text = e.clipboardData ? e.clipboardData.getData('text') : '';
+  const lines = String(text || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  if (lines.length > 1) {
+    e.preventDefault();
+    openBatch(text);
   }
+});
+
+/* ---------- batch capture ---------- */
+function openBatch(prefill = '') {
+  $('#batchUrls').value = prefill || '';
+  $('#batchModal').classList.remove('hidden');
+  $('#batchUrls').focus();
+}
+$('#batchCancel').addEventListener('click', () => $('#batchModal').classList.add('hidden'));
+$('#batchStart').addEventListener('click', async () => {
+  const text = $('#batchUrls').value.trim();
+  if (!text) return;
+  $('#batchModal').classList.add('hidden');
+  await startCaptures(text);
+});
+
+/* ---------- capture sessions: log in + cookies file ---------- */
+$('#btnLogin').addEventListener('click', async () => {
+  const button = $('#btnLogin');
+  button.disabled = true;
+  toast('Sign in to the site in the browser window, then close that window when you\'re done', {
+    kind: 'ok', timeout: 10000,
+  });
+  try {
+    await invoke('capture:login', { url: $('#url').value.trim() || undefined });
+    $('#useProfile').checked = true;
+    syncOptions();
+    toast('Login saved — captures with "signed in" on will use it', { kind: 'ok', timeout: 7000 });
+  } catch (err) {
+    failed(err);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('#btnCookies').addEventListener('click', async () => {
+  const file = await invoke('settings:browseCookies').catch(() => null);
+  if (!file) return;
+  $('#cookiesFile').value = file;
+  syncOptions();
+});
+
+/* ---------- capture queue ---------- */
+window.snap.on('run:queue', ({ items }) => {
+  const box = $('#runQueue');
+  const list = $('#queueList');
+  list.innerHTML = '';
+  box.classList.toggle('hidden', !items.length);
+  if (!items.length) return;
+  $('#runPanel').classList.remove('hidden');
+  items.forEach((item, index) => {
+    const row = document.createElement('div');
+    row.className = 'queue-row';
+    const pos = document.createElement('span');
+    pos.className = 'queue-pos';
+    pos.textContent = String(index + 1);
+    const label = document.createElement('span');
+    label.className = 'queue-url';
+    label.textContent = item.url;
+    label.title = item.url;
+    row.appendChild(pos);
+    row.appendChild(label);
+    row.appendChild(iconBtn('stop', 'Remove this one from the queue', () =>
+      invoke('capture:dequeue', { qid: item.qid })));
+    list.appendChild(row);
+  });
+});
+$('#queueClear').addEventListener('click', async () => {
+  await invoke('capture:dequeue', { qid: 'all' }).catch(failed);
+  toast('Queue cleared — the capture already running finishes on its own', { timeout: 4000 });
 });
 
 $('#btnCancel').addEventListener('click', async () => {
@@ -440,7 +564,7 @@ window.snap.on('run:busy', ({ busy }) => {
   $('#tab-extractor').classList.toggle('busy', busy);
 });
 
-window.snap.on('run:done', async ({ ok, dir, stats, error, canceled, seconds, install, audit }) => {
+window.snap.on('run:done', async ({ ok, dir, stats, error, canceled, seconds, install, audit, recapture }) => {
   // An install has no capture stats to summarise — it either worked or it said why.
   if (install) {
     stopRunPanel(ok ? 'done' : 'fail', ok ? 'Dependencies installed.' : 'Install failed: ' + error);
@@ -449,6 +573,23 @@ window.snap.on('run:done', async ({ ok, dir, stats, error, canceled, seconds, in
   }
   // Audits never open the run panel; whoever started one toasts its summary.
   if (audit) {
+    await refreshLibrary();
+    return;
+  }
+  if (recapture) {
+    if (ok) {
+      stopRunPanel('done', `Done — re-captured ${stats.pages} page${stats.pages === 1 ? '' : 's'}${seconds ? ` in ${seconds}s` : ''}`);
+      toast('Re-captured — the previous version is in history', {
+        kind: 'ok', timeout: 12000,
+        action: { label: 'History', fn: () => {
+          const site = state.library.sites.find(s => s.dir === dir);
+          if (site) openHistory(site, 'versions');
+        } },
+      });
+    } else {
+      stopRunPanel(canceled ? '' : 'fail', canceled ? 'Canceled.' : 'Failed: ' + error);
+      if (!canceled) failed(new Error(error));
+    }
     await refreshLibrary();
     return;
   }
@@ -591,6 +732,25 @@ $('#attachSave').addEventListener('click', async () => {
 async function openStudioBrowser(site) {
   await invoke('studio:open', { id: site.projectId });
   await refreshLibrary();
+}
+
+/* ---------- re-capture as a version ---------- */
+async function recaptureSite(site) {
+  const yes = await invoke('shell:confirm', {
+    title: 'Re-capture',
+    message: `Capture "${site.name}" again from ${site.sourceUrl}?`,
+    detail: 'The same capture options run again. The site as it is right now is snapshotted first, '
+      + 'so the old version stays restorable and diffable from Project history.',
+    confirmLabel: 'Re-capture',
+  });
+  if (!yes) return;
+  startRunPanel('Re-capturing…');
+  try {
+    await invoke('capture:recapture', { id: site.projectId });
+  } catch (err) {
+    stopRunPanel('fail', err.message);
+    failed(err);
+  }
 }
 
 /* ---------- drag & drop: add a local folder as a project ---------- */
@@ -846,6 +1006,11 @@ function renderCard(site) {
   if (!site.attachOnly) {
     more.push({ icon: 'folder', label: 'Open folder', fn: () => invoke('open:folder', { dir: site.dir }) });
     more.push({ icon: 'code', label: 'Open in VS Code', fn: () => invoke('open:editor', { dir: site.dir }) });
+  }
+  // Fresh content from the web, previous state kept as a snapshot — only a
+  // capture that remembers where it came from can offer this.
+  if (site.kind === 'extracted' && site.sourceUrl && site.projectId && !site.missing) {
+    more.push({ icon: 'refresh', label: 'Re-capture from the web…', fn: () => recaptureSite(site) });
   }
   if (site.kind === 'extracted') {
     more.push({ icon: 'film', label: 'Restore stripped videos', fn: async () => {
@@ -1990,6 +2155,10 @@ function allCommands() {
         if ($('#options').classList.contains('hidden')) $('#btnOptions').click();
         $('#options').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       } },
+    { group: 'extractor', icon: 'map', label: 'Capture a list of URLs or a sitemap…',
+      fn: () => { setTab('extractor'); openBatch(); } },
+    { group: 'extractor', icon: 'globe', label: 'Log in for capture — save a site login for captures',
+      fn: () => { setTab('extractor'); $('#btnLogin').click(); } },
     { group: 'view', icon: 'unpack', label: 'Go to Extractor', keys: 'Ctrl 1', fn: () => setTab('extractor') },
     { group: 'view', icon: 'map', label: 'Go to Studio', keys: 'Ctrl 2', fn: () => setTab('studio') },
     { group: 'library', icon: 'refresh', label: 'Refresh library', keys: 'F5', fn: refreshLibrary },
@@ -2018,6 +2187,10 @@ function allCommands() {
       if (!site.missing && !site.attachOnly) {
         list.push({ group: 'sites', icon: 'check', label: `Run audits on ${site.name}`,
           fn: () => runSiteAudits(site) });
+      }
+      if (site.kind === 'extracted' && site.sourceUrl && !site.missing) {
+        list.push({ group: 'sites', icon: 'refresh', label: `Re-capture ${site.name} from the web`,
+          fn: () => recaptureSite(site) });
       }
     }
   }
@@ -2125,7 +2298,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeMenu();
     for (const sel of ['#cmdModal', '#settingsModal', '#doctorModal', '#aboutModal', '#paletteDrawer',
-      '#historyModal', '#calibrationModal', '#logModal', '#entryModal', '#snapModal', '#attachModal']) {
+      '#historyModal', '#calibrationModal', '#logModal', '#entryModal', '#snapModal', '#attachModal',
+      '#batchModal']) {
       $(sel).classList.add('hidden');
     }
     clearInterval(logTimer);
@@ -2151,7 +2325,7 @@ document.addEventListener('keydown', e => {
 
 // Click the backdrop to dismiss a modal.
 for (const id of ['cmdModal', 'settingsModal', 'doctorModal', 'aboutModal', 'historyModal', 'runtimeModal',
-  'calibrationModal', 'logModal', 'entryModal', 'snapModal', 'attachModal']) {
+  'calibrationModal', 'logModal', 'entryModal', 'snapModal', 'attachModal', 'batchModal']) {
   document.getElementById(id).addEventListener('click', e => {
     if (e.target.id === id) e.target.classList.add('hidden');
   });
