@@ -701,7 +701,6 @@ function sinceText(iso) {
 async function openShare(site, prefer = null) {
   shareState.site = site;
   $('#shareName').textContent = '— ' + site.name;
-  $('#shareGuest').checked = !!(site.share && site.share.guest);
   $('#shareToken').value = '';
 
   // Which modes this site can use: the tunnel needs the site hosted, the
@@ -727,6 +726,11 @@ async function openShare(site, prefer = null) {
   if (mode === 'cloud' && cloudWhy) mode = 'tunnel';
   if (mode === 'tunnel' && tunnelWhy && !cloudWhy) mode = 'cloud';
   $(mode === 'cloud' ? '#shareModeCloud' : '#shareModeTunnel').checked = true;
+  // Annotation follows what is already on; a fresh 24/7 link starts with it
+  // on, because auditing whenever they have a chance is what the link is for.
+  $('#shareGuest').checked = mode === 'cloud'
+    ? (site.deploy ? !!site.deploy.audit : true)
+    : !!(site.share && site.share.guest);
 
   try {
     const { has } = await invoke('deploy:token', { provider: 'netlify' });
@@ -767,7 +771,8 @@ async function openShare(site, prefer = null) {
     $('#shareCloudLinkText').value = site.deploy.url;
     const since = site.deploy.at ? sinceText(site.deploy.at) : '';
     $('#shareCloudLabel').textContent = 'Up 24/7' + (since ? ` — files pushed ${since}` : '')
-      + (site.deploy.version ? ` from snapshot ${site.deploy.version}` : '') + ':';
+      + (site.deploy.version ? ` from snapshot ${site.deploy.version}` : '')
+      + (site.deploy.audit ? ' · reviewers can annotate' : ' · view only') + ':';
   }
   syncShareMode();
   $('#shareModal').classList.remove('hidden');
@@ -778,8 +783,10 @@ async function openShare(site, prefer = null) {
 function syncShareMode() {
   const site = shareState.site;
   const cloud = shareMode() === 'cloud';
-  $('#shareTunnelOpts').classList.toggle('hidden', cloud);
   $('#shareCloudOpts').classList.toggle('hidden', !cloud);
+  $('#shareGuestHint').textContent = cloud
+    ? 'Reviewers open the link whenever they have a chance and leave notes on the page, signed with their name. Their notes stay in their browser until they press Send audit, which downloads a file — read it in with Import audit… in Project history.'
+    : 'Guests leave notes on the page, signed with their name. Exports, resolving and your files stay locked to this machine.';
   $('#shareVersionHint').textContent = cloud
     ? 'Put a snapshot online instead of the files as they are now — byte-for-byte, so the link is reproducible.'
     : 'Pin the link to a snapshot and reviewers see that exact state while you keep editing live. Pinned guests can annotate until a newer snapshot exists.';
@@ -834,7 +841,7 @@ $('#shareGo').addEventListener('click', async () => {
   const button = $('#shareGo');
   const cloud = shareMode() === 'cloud';
   const version = $('#shareVersion').value || null;
-  const guestReview = !cloud && $('#shareGuest').checked;
+  const guestReview = $('#shareGuest').checked;
   button.disabled = true;
   if (cloud) {
     // The token saves first, so a mistyped one fails here — not mid-upload.
@@ -861,8 +868,8 @@ $('#shareGo').addEventListener('click', async () => {
     pending.remove();
     const host = url.replace('https://', '').split('/?')[0];
     toast(cloud
-      ? `${site.name} is up 24/7 at ${host}` + (version ? ' · from a snapshot' : '')
-        + ' — it stays online with this PC off, until you take it down'
+      ? `${site.name} is up 24/7 at ${host}` + (guestReview ? ' — reviewers can annotate and send you an audit file' : '')
+        + (version ? ' · from a snapshot' : '') + ' — it stays online with this PC off, until you take it down'
       : `${site.name} is public at ${host}` + (guestReview ? ' — guests can annotate' : '')
         + (version ? ' · pinned to a snapshot' : '') + ' — the link works until sharing or hosting stops', {
       kind: 'ok', timeout: 15000,

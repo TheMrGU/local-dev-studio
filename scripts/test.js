@@ -38,7 +38,8 @@ require.cache[require.resolve('electron')] = {
 
 const { scanPalette, applyColor, undoColor, listUndo, parseColor } = require('../lib/palette');
 const { extractSite, uniqueOutDir } = require('../lib/extract');
-const { zipFolder, zipFiles } = require('../lib/zip');
+const { zipFolder, zipFiles, folderEntries } = require('../lib/zip');
+const staticAudit = require('../lib/staticAudit');
 const { makeHandler, HostManager } = require('../lib/server');
 const { makeProxyHandler, adjustCsp } = require('../lib/proxy');
 const { parsePublicUrl, viaTunnel } = require('../lib/tunnel');
@@ -928,6 +929,35 @@ async function reviewStoreTests() {
     eq(short.input.why, 'too gray', 'short reason saved: ');
     await throws(() => reviewsStore.addAnnotation(PRJ, {
       scope: 'element', context: {}, input: {},
+    }), 'entirely empty');
+  });
+
+  await check('an audit file from a 24/7 link imports note for note, and remembers where each came from', async () => {
+    // The shape the standalone overlay downloads: the full captured context
+    // (a live guest POSTs the same) plus the browser-minted id the owner's
+    // import de-duplicates on.
+    const note = {
+      id: 'g_1a069959087b5551b', reviewId: 'rev_x', scope: 'element', createdAt: '2026-09-03T23:22:55.422Z',
+      resolved: false, author: 'gav', auto: false, local: true,
+      context: {
+        viewport: { width: 1118, height: 525, label: 'desktop' }, pageUrl: '/_en.html', selector: '#hero',
+        selectorFallback: 'body > h1:nth-child(1)', outerHTML: '<h1 id="hero">Zentrix Media</h1>',
+        boundingBox: { x: 40, y: 40, w: 300, h: 46 }, computedStyles: { fontSize: '40px' }, sourceFile: '_en.html',
+      },
+      input: { rating: 3, severity: 'nitpick', axes: [], why: 'Hero type is oversized at this width', want: '' },
+    };
+    const imported = reviewsStore.addAnnotation(PRJ, {
+      scope: note.scope, context: note.context, input: note.input, author: note.author, importedFrom: note.id,
+    });
+    eq(imported.importedFrom, note.id);
+    eq(imported.author, 'gav');
+    eq(imported.input.why, 'Hero type is oversized at this width');
+    eq(imported.context.selector, '#hero');
+    ok(/^ann_/.test(imported.id), 'gets a store id of its own: ' + imported.id);
+    // An empty note the overlay refuses to save would be refused here too.
+    await throws(() => reviewsStore.addAnnotation(PRJ, {
+      scope: 'element', context: note.context, input: { rating: null, severity: 'nitpick', axes: [], why: '', want: '' },
+      author: 'gav', importedFrom: 'g_empty',
     }), 'entirely empty');
   });
 
@@ -3462,16 +3492,56 @@ async function sharingPowerTests() {
     const result = await zipFiles([
       { name: 'index.html', file: path.join(blobs, 'blob1') },
       { name: 'assets/site.css', file: path.join(blobs, 'blob2') },
+      // Bytes made for the archive, no file behind them — how the 24/7 audit
+      // bundle adds its state file.
+      { name: '_redirects', data: Buffer.from('/  /index.html  200\n') },
     ], zipPath);
-    eq(result.files, 2);
+    eq(result.files, 3);
     if (process.platform === 'win32') {
       const dest = path.join(TMP, 'deploy-unzipped');
       execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
         `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${dest}' -Force`], { windowsHide: true });
       eq(fs.readFileSync(path.join(dest, 'index.html'), 'utf8'), '<h1>from a snapshot</h1>');
       eq(fs.readFileSync(path.join(dest, 'assets', 'site.css'), 'utf8'), 'body{color:blue}');
+      eq(fs.readFileSync(path.join(dest, '_redirects'), 'utf8'), '/  /index.html  200\n');
     }
     await throws(() => zipFiles([], path.join(TMP, 'empty.zip')), 'an empty entry list refuses');
+  });
+
+  await check('a 24/7 audit bundle carries the overlay, a state file, and the entry redirect', async () => {
+    const site = scratch('static-audit');
+    fs.writeFileSync(path.join(site, '_en.html'), '<html><body><h1>hi</h1></body></html>');
+    fs.writeFileSync(path.join(site, 'about.html'), '<h1>no body tag</h1>');
+    fs.writeFileSync(path.join(site, 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const entries = await folderEntries(site);
+    // The capture's real front door answers at "/" on the host.
+    const redirect = staticAudit.entryRedirect(entries, '_en.html');
+    eq(redirect.name, '_redirects');
+    eq(redirect.data.toString(), '/  /_en.html  200\n');
+    eq(staticAudit.entryRedirect(entries, 'index.html'), null, 'index.html needs no redirect: ');
+    eq(staticAudit.entryRedirect(entries, 'missing.html'), null, 'a page that is not there is not redirected to: ');
+    eq(staticAudit.entryRedirect([...entries, { name: 'index.html', data: Buffer.from('') }], '_en.html'), null,
+      'an existing index.html wins: ');
+    entries.push(redirect);
+    const state = staticAudit.standaloneState({
+      project: { name: 'Demo' }, review: { id: 'rev_1' }, annotations: [{ id: 'a1' }], axes: ['x'], minWhy: 0, version: 'v2',
+    });
+    const bundle = await staticAudit.withStaticAudit(entries, { overlaySource: '/* overlay */', state });
+    eq(bundle.pages, 2);
+    const byName = Object.fromEntries(bundle.entries.map(e => [e.name, e]));
+    ok(byName['_en.html'].data.toString().includes(staticAudit.TAG + '</body>'), 'the tag lands before </body>');
+    ok(byName['about.html'].data.toString().endsWith(staticAudit.TAG), 'a page without </body> gets the tag appended');
+    ok(byName['logo.png'].file, 'other files still come straight from disk');
+    eq(byName[staticAudit.CLIENT_NAME].data.toString(), '/* overlay */');
+    const shipped = JSON.parse(byName[staticAudit.STATE_NAME].data.toString());
+    eq(shipped.guest, true);
+    eq(shipped.standalone, true);
+    eq(shipped.project.name, 'Demo');
+    eq(shipped.review.id, 'rev_1');
+    eq(shipped.version, 'v2');
+    eq(shipped.annotations.length, 1);
+    eq(byName['_redirects'].data.toString(), '/  /_en.html  200\n');
+    ok(staticAudit.TAG.includes('data-ss-standalone="1"'), 'the tag tells the overlay it is on its own');
   });
 }
 

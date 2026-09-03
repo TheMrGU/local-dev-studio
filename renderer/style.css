@@ -1244,3 +1244,5 @@ textarea:focus { border-color: var(--line-2); background: var(--surface-3); }
    has both. */
 .badge.public.always::before { animation: none; }
 .badge.public.always.second { top: 34px; }
+/* The guest hint under the checkbox is a block, so the token field below it breathes. */
+#shareGuestHint { display: block; margin-bottom: 14px; }

@@ -1,7 +1,7 @@
 {
   "name": "siteslurp",
   "productName": "SiteSlurp Studio",
-  "version": "2.5.3",
+  "version": "2.5.4",
   "description": "Slurp any website into editable files, host and manage client sites locally, and turn on-page feedback into AI-ready specs.",
   "main": "main.js",
   "author": {

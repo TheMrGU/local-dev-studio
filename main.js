@@ -45,7 +45,9 @@ const { fixVideos } = require('./lib/videofix');
 const { fixModels } = require('./lib/modelfix');
 const { GrabManager } = require('./lib/grab');
 const { MenuManager } = require('./lib/menu');
-const { zipFolder, zipFiles } = require('./lib/zip');
+const { zipFolder, zipFiles, folderEntries } = require('./lib/zip');
+const { withStaticAudit, entryRedirect, standaloneState } = require('./lib/staticAudit');
+const { resolveEntry } = require('./lib/entry');
 const { listLibrary, describeLocal, invalidate } = require('./lib/library');
 const projects = require('./lib/projects');
 const reviews = require('./lib/reviews');
@@ -59,7 +61,7 @@ const { ControlServer } = require('./lib/control');
 const verify = require('./lib/verify');
 const audits = require('./lib/audits');
 // [PRO] sharing power: guest review over share links, local https, deploy.
-const { GuestManager } = require('./lib/guest');
+const { GuestManager, stripAnnotation } = require('./lib/guest');
 const certs = require('./lib/certs');
 const { runDeploy, runRemove, siteNameFor, adapterFor } = require('./lib/deploy');
 const secrets = require('./lib/secrets');
@@ -1778,9 +1780,9 @@ function registerIpc() {
     // machine — nothing here needs the site hosted, or the app open after.
     if (mode === 'cloud') {
       if (!project) throw new Error('A 24/7 link needs a project in the library — this folder is only hosted.');
-      const result = await publishProject(project, { version });
-      log.info('sharing 24/7', dir, result.url, version ? `(snapshot ${version})` : '');
-      return { url: result.url, mode: 'cloud', version: result.version, files: result.files };
+      const result = await publishProject(project, { version, audit: guestReview });
+      log.info('sharing 24/7', dir, result.url, guestReview ? '(audit)' : '', version ? `(snapshot ${version})` : '');
+      return { url: result.url, mode: 'cloud', version: result.version, files: result.files, audit: result.audit };
     }
 
     const port = hosts.portFor(dir);
@@ -1910,7 +1912,7 @@ function registerIpc() {
    *  (or a snapshot, byte-exact), creates the site on the first run and
    *  updates it after; the record on the project is what the card and the
    *  Share window show as the 24/7 link. */
-  async function publishProject(project, { provider = 'netlify', version = null } = {}) {
+  async function publishProject(project, { provider = 'netlify', version = null, audit = false } = {}) {
     const id = project.id;
     if (project.attachOnly) throw new Error('A folderless attach project has no files to put online.');
     const runtime = projects.runtimeFor(project);
@@ -1923,25 +1925,43 @@ function registerIpc() {
 
     const progress = msg => send('deploy:progress', { id, msg });
 
-    // The archive: the working tree zips straight from disk; a snapshot zips
+    // The archive: the working tree packs straight from disk; a snapshot packs
     // from its manifest's blobs — any historical version deploys byte-exact.
     const serveRoot = runtime.root ? path.join(project.path, runtime.root) : project.path;
     const tmpZip = path.join(app.getPath('temp'), `siteslurp-deploy-${Date.now()}.zip`);
     progress('Packing the files…');
-    let zipped;
+    let entries;
     if (version) {
       const snap = versions.getSnapshot(project, String(version));
       const prefix = runtime.root ? String(runtime.root).replace(/\\/g, '/').replace(/\/+$/, '') + '/' : '';
-      const entries = [];
+      entries = [];
       for (const f of snap.files) {
         if (prefix && !f.path.startsWith(prefix)) continue;
         const at = versions.fileAt(project, snap.id, f.path);
         if (at) entries.push({ name: f.path.slice(prefix.length), file: at.blobPath });
       }
-      zipped = await zipFiles(entries, tmpZip);
     } else {
-      zipped = await zipFolder(serveRoot, tmpZip);
+      entries = await folderEntries(serveRoot);
     }
+    // The site's real front door answers at "/" on the host too — a capture
+    // almost never has an index.html.
+    const redirect = entryRedirect(entries, project.entryFile || resolveEntry(serveRoot));
+    if (redirect) entries.push(redirect);
+    // Reviewers on a 24/7 link: the overlay ships inside the site and keeps
+    // their notes in the browser until they send the audit file.
+    let pages = 0;
+    if (audit) {
+      const state = standaloneState({
+        project,
+        review: reviews.activeReview(id),
+        annotations: reviews.listAnnotations(id).map(stripAnnotation),
+        axes: reviews.AXES,
+        minWhy: reviews.MIN_WHY,
+        version: version || null,
+      });
+      ({ entries, pages } = await withStaticAudit(entries, { overlaySource: reviewManager.overlayScript(), state }));
+    }
+    const zipped = await zipFiles(entries, tmpZip);
 
     try {
       const linked = project.deploy && project.deploy.provider === provider ? project.deploy.siteId : null;
@@ -1950,11 +1970,17 @@ function registerIpc() {
         name: linked ? null : siteNameFor(project.name), onProgress: progress,
       });
       projects.update(id, {
-        deploy: { provider, siteId: result.siteId, url: result.url, at: new Date().toISOString(), version: version || null },
+        deploy: {
+          provider, siteId: result.siteId, url: result.url,
+          at: new Date().toISOString(), version: version || null, audit: !!audit,
+        },
       });
-      log.info('deployed', project.name, provider, result.url);
+      log.info('deployed', project.name, provider, result.url, audit ? `(audit on, ${pages} pages)` : '');
       send('ui:refresh');
-      return { url: result.url, siteId: result.siteId, files: zipped.files, bytes: zipped.bytes, version: version || null };
+      return {
+        url: result.url, siteId: result.siteId, files: zipped.files, bytes: zipped.bytes,
+        version: version || null, audit: !!audit, pages,
+      };
     } finally {
       fs.promises.rm(tmpZip, { force: true }).catch(() => {});
     }

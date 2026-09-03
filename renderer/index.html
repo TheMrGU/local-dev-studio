@@ -569,15 +569,14 @@
       <label class="share-mode"><input type="radio" name="shareMode" id="shareModeCloud" value="cloud">
         <span class="share-mode-title">24/7, even with this PC off</span>
         <span class="mini">The files go to Netlify's CDN at a permanent https address and stay up until you
-          take the link down. Share again to push your latest changes.</span>
+          take the link down. Reviewers open it whenever they have a chance; share again to push your
+          latest changes.</span>
         <span class="mini share-mode-why hidden" id="shareCloudWhy"></span>
       </label>
     </div>
-    <div id="shareTunnelOpts">
-      <label class="opt inline"><input type="checkbox" id="shareGuest"> Let visitors annotate (guest review)</label>
-      <span class="mini modal-hint">Guests leave notes on the page, signed with their name. Exports, resolving and
-        your files stay locked to this machine.</span>
-    </div>
+    <label class="opt inline"><input type="checkbox" id="shareGuest"> Let visitors annotate (guest review)</label>
+    <span class="mini modal-hint" id="shareGuestHint">Guests leave notes on the page, signed with their name. Exports, resolving and
+      your files stay locked to this machine.</span>
     <div id="shareCloudOpts" class="hidden">
       <label>Netlify access token <span id="shareTokenState" class="mini"></span>
         <input id="shareToken" type="password" spellcheck="false" placeholder="paste a personal access token">

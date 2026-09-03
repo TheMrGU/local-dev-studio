@@ -34,7 +34,7 @@
   // hides what would only ever answer 403.
   const isGuest = () => !!(state.config && state.config.guest);
 
-  const api = {
+  const liveApi = {
     get: route => fetch(API + route).then(r => r.json()),
     post: (route, body) => fetch(API + route, {
       method: 'POST',
@@ -46,6 +46,70 @@
       return data;
     }),
   };
+
+  // A 24/7 link: the site sits on a static host with no app behind it. The
+  // publish step said so on the script tag and shipped state.json in place of
+  // the API's answer; the reviewer's notes live in this browser until they
+  // press "Send audit", and the owner imports that file. This transport
+  // answers the same routes the overlay would ask the app — nothing above it
+  // needs to know which world it is in.
+  const STANDALONE = !!(document.currentScript && document.currentScript.dataset.ssStandalone);
+  const LOCAL_KEY = '__ss_audit_notes';
+  const localNotes = {
+    all() {
+      try {
+        const raw = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]');
+        return Array.isArray(raw) ? raw : [];
+      } catch { return []; }
+    },
+    save(list) { localStorage.setItem(LOCAL_KEY, JSON.stringify(list)); },
+  };
+  const localId = () => 'g_' + Date.now().toString(16) + Math.random().toString(16).slice(2, 8);
+  const standaloneApi = {
+    async get(route) {
+      if (route !== 'state') throw new Error('Not available on a 24/7 link.');
+      const base = await fetch(API + 'state.json', { cache: 'no-store' }).then(r => r.json());
+      return { ...base, guest: true, standalone: true, annotations: [...(base.annotations || []), ...localNotes.all()] };
+    },
+    async post(route, body = {}) {
+      const list = localNotes.all();
+      if (route === 'annotate') {
+        // The store's one rule, kept here too: a completely empty note never
+        // saves — the owner's import would only throw it away.
+        const input = body.input || {};
+        const said = (input.why || '').trim() || (input.want || '').trim() || (input.rating !== null && input.rating !== undefined);
+        if (!said) throw new Error('An empty annotation says nothing — add a rating or a note first.');
+        const annotation = {
+          id: localId(),
+          reviewId: state.config && state.config.review ? state.config.review.id : '',
+          scope: body.scope,
+          createdAt: new Date().toISOString(),
+          resolved: false,
+          author: body.author || 'Guest',
+          auto: false,
+          local: true,
+          context: body.context,
+          input: body.input,
+        };
+        list.push(annotation);
+        localNotes.save(list);
+        return { annotation };
+      }
+      if (route === 'update') {
+        const note = list.find(a => a.id === body.id);
+        if (!note) throw new Error('Only your own notes can change here.');
+        if (body.patch && body.patch.input) note.input = { ...note.input, ...body.patch.input };
+        localNotes.save(list);
+        return { annotation: note };
+      }
+      if (route === 'delete') {
+        localNotes.save(list.filter(a => a.id !== body.id));
+        return { ok: true };
+      }
+      throw new Error('Not available on a 24/7 link.');
+    },
+  };
+  const api = STANDALONE ? standaloneApi : liveApi;
 
   /* ---------- selector generation ---------- */
   const cssEscape = s => (window.CSS && CSS.escape ? CSS.escape(s) : s.replace(/[^a-zA-Z0-9_-]/g, '\\$&'));
@@ -781,6 +845,24 @@
     if (isGuest()) {
       if (annotation.resolved) pinPop.appendChild(el('p', 'pin-res', 'Resolved'));
       const actions = el('div', 'actions');
+      // A note that only exists in this browser is still the reviewer's to
+      // change or drop before it is sent.
+      if (STANDALONE && annotation.local) {
+        const edit = el('button', 'ghost', 'Edit');
+        edit.addEventListener('click', () => {
+          closePinPop();
+          openPanel(annotation.scope, annotation.context, { annotation });
+        });
+        actions.appendChild(edit);
+        const del = el('button', 'ghost', 'Delete');
+        del.addEventListener('click', async () => {
+          await api.post('delete', { id: annotation.id }).catch(() => {});
+          closePinPop();
+          await refreshState();
+          renderPins();
+        });
+        actions.appendChild(del);
+      }
       const close = el('button', 'ghost', 'Close');
       close.addEventListener('click', closePinPop);
       actions.appendChild(close);
@@ -945,7 +1027,9 @@
   /* ---------- toolbar ---------- */
   const bar = el('div', 'bar');
   const countLabel = () => {
-    const mine = state.config ? state.config.annotations.filter(a => a.reviewId === state.config.review.id).length : 0;
+    const mine = !state.config ? 0
+      : STANDALONE ? state.config.annotations.filter(a => a.local).length
+        : state.config.annotations.filter(a => a.reviewId === state.config.review.id).length;
     return `${mine} note${mine === 1 ? '' : 's'}`;
   };
 
@@ -955,13 +1039,16 @@
    *  still the primary path — this survives the share link dying first. */
   function downloadAuditFile() {
     const cfg = state.config || {};
-    const annotations = (cfg.annotations || []).filter(a => !a.auto);
+    // On a 24/7 link only this browser's notes travel — the owner already has
+    // everything that was published with the site.
+    const annotations = (cfg.annotations || []).filter(a => (STANDALONE ? a.local : !a.auto));
     if (!annotations.length) { toast('Nothing to send yet — save a note first.'); return; }
     const payload = {
       siteslurpAudit: 1,
       project: cfg.project ? cfg.project.name : '',
       author: state.guestName || 'Guest',
       exportedAt: new Date().toISOString(),
+      ...(cfg.version ? { version: cfg.version } : {}),
       annotations,
     };
     const blob = new window.Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -1009,7 +1096,9 @@
       // Notes already reached the owner live as they were saved; the file is
       // the backup path — it survives the link going down before they looked.
       const sendBtn = el('button', '', 'Send audit');
-      sendBtn.title = 'Download this audit as a file you can send — the owner imports it from Project history';
+      sendBtn.title = STANDALONE
+        ? 'Download your notes as a file to send the owner — they import it from Project history'
+        : 'Download this audit as a file you can send — the owner imports it from Project history';
       sendBtn.addEventListener('click', downloadAuditFile);
       bar.appendChild(sendBtn);
       const cheat = el('button', '', '?');
@@ -1450,7 +1539,9 @@
     if (existing) existing.remove();
     root.appendChild(el('div', 'banner',
       'Reviewing as guest' + (state.guestName ? ' — ' + state.guestName : '')
-      + ' · your notes go to the site\'s owner'));
+      + (STANDALONE
+        ? ' · notes stay in this browser until you press Send audit'
+        : ' · your notes go to the site\'s owner')));
   }
 
   async function boot() {
