@@ -43,7 +43,7 @@ const { makeHandler, HostManager } = require('../lib/server');
 const { makeProxyHandler, adjustCsp } = require('../lib/proxy');
 const { parsePublicUrl, viaTunnel } = require('../lib/tunnel');
 const runtimes = require('../lib/runtimes');
-const { portAnswers, AttachRunner } = require('../lib/runner');
+const { Runner, AttachRunner, freePort, portAnswers } = require('../lib/runner');
 const { CHECKLISTS } = require('../lib/checklists');
 const { resolveEntry } = require('../lib/entry');
 const { normalizeUrl, nameFromUrl, reserveCaptureDir, writeManifest, readManifest,
@@ -59,6 +59,9 @@ const reviewsStore = require('../lib/reviews');
 const calibrationStore = require('../lib/calibration');
 const { exportReview, styleLine, renderAnnotation, renderReviewMd } = require('../lib/reviewExport');
 const { ReviewManager } = require('../lib/review');
+const { fixModels } = require('../lib/modelfix');
+const { GrabManager, localPathFor } = require('../lib/grab');
+const { MenuManager } = require('../lib/menu');
 const { locateSource } = require('../lib/sourceline');
 const { ControlServer } = require('../lib/control');
 const { GuestManager } = require('../lib/guest');
@@ -282,6 +285,111 @@ async function extractTests() {
     await extractSite(src, out, {});
     const html = fs.readFileSync(path.join(out, 'a.html'), 'utf8');
     ok(html.includes('<style>'), 'svg style survived: ' + html);
+  });
+
+  await check('kept scripts come out as .js files, models as .glb', async () => {
+    const src = scratch('ex-js');
+    const jsB64 = Buffer.from('console.log("hi from a kept script")').toString('base64');
+    const glbB64 = Buffer.from('glTF-binary-payload-here').toString('base64');
+    fs.writeFileSync(path.join(src, 'a.html'), [
+      `<script src="data:text/javascript;base64,${jsB64}"></script>`,
+      `<a href="data:model/gltf-binary;base64,${glbB64}">scene</a>`,
+    ].join('\n'));
+    const out = path.join(TMP, 'ex-js-out');
+    const stats = await extractSite(src, out, {});
+    eq(stats.scripts, 1);
+    eq(stats.models, 1);
+    const script = fs.readdirSync(path.join(out, 'assets', 'scripts'))[0];
+    ok(/^script-[0-9a-f]{10}\.js$/.test(script), 'js extension: ' + script);
+    const model = fs.readdirSync(path.join(out, 'assets', 'models'))[0];
+    ok(/^model-[0-9a-f]{10}\.glb$/.test(model), 'glb extension: ' + model);
+  });
+
+  await check('a <style> string inside a kept script is not torn out', async () => {
+    const src = scratch('ex-jsstyle');
+    const styleStr = `<style>${'.injected{color:blue}'.padEnd(100, ' ')}</style>`;
+    fs.writeFileSync(path.join(src, 'a.html'),
+      `<script>document.head.insertAdjacentHTML('beforeend', '${styleStr}')</script>`);
+    const out = path.join(TMP, 'ex-jsstyle-out');
+    await extractSite(src, out, {});
+    const html = fs.readFileSync(path.join(out, 'a.html'), 'utf8');
+    ok(html.includes('.injected{color:blue}'), 'script-embedded style survived: ' + html);
+  });
+
+  await check('keepHiddenStyles leaves reveal styles for the scripts to animate', async () => {
+    const src = scratch('ex-keephidden');
+    fs.writeFileSync(path.join(src, 'a.html'),
+      '<div style="opacity: 0; transform: translateY(40px)">reveal</div>');
+    const out = path.join(TMP, 'ex-keephidden-out');
+    await extractSite(src, out, { keepHiddenStyles: true });
+    const html = fs.readFileSync(path.join(out, 'a.html'), 'utf8');
+    ok(/opacity:\s*0/.test(html), 'hidden style kept: ' + html);
+  });
+}
+
+/* ---------------- modelfix ---------------- */
+async function modelfixTests() {
+  console.log('\nmodelfix');
+
+  await check('mirrors script-fetched assets and rewrites references', async () => {
+    const payload = 'glTF-binary-bytes';
+    const server = http.createServer((req, res) => {
+      if (req.url.startsWith('/deep/models/scene.glb') || req.url === '/img/thumb.webp') {
+        res.writeHead(200); res.end(payload);
+      } else {
+        res.writeHead(404); res.end();
+      }
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+
+    try {
+      const dir = scratch('mf-site');
+      fs.writeFileSync(path.join(dir, 'a.html'), [
+        `<!--\n Page saved with SingleFile \n url: ${origin}/deep/page/ \n-->`,
+        '<script>loader.load(\'../models/scene.glb?v=3\')</script>',
+      ].join('\n'));
+      // Runtime media referenced only from an extracted script file.
+      fs.mkdirSync(path.join(dir, 'assets', 'scripts'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'assets', 'scripts', 'script-abc.js'),
+        'const thumbs = ["./img/thumb.webp"];');
+
+      const count = await fixModels(dir, origin + '/', () => {});
+      eq(count, 2);
+      eq(fs.readFileSync(path.join(dir, 'deep', 'models', 'scene.glb'), 'utf8'), payload);
+      eq(fs.readFileSync(path.join(dir, 'img', 'thumb.webp'), 'utf8'), payload);
+      const html = fs.readFileSync(path.join(dir, 'a.html'), 'utf8');
+      ok(html.includes("loader.load('/deep/models/scene.glb')"), 'reference rewritten root-relative: ' + html);
+      const js = fs.readFileSync(path.join(dir, 'assets', 'scripts', 'script-abc.js'), 'utf8');
+      ok(js.includes('"/img/thumb.webp"'), 'script reference rewritten: ' + js);
+    } finally {
+      server.close();
+    }
+  });
+
+  await check('never mistakes method calls for asset paths', async () => {
+    const dir = scratch('mf-methods');
+    const js = 'fetch("/api").then((res) => res.json()); const t = img.webp; go(sprite.png);';
+    fs.mkdirSync(path.join(dir, 'assets', 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'assets', 'scripts', 'script-a.js'), js);
+    fs.writeFileSync(path.join(dir, 'a.html'), '<!--\n url: https://site.test/ \n--><p>hi</p>');
+    const count = await fixModels(dir, 'https://site.test/', () => {});
+    eq(count, 0);
+    eq(fs.readFileSync(path.join(dir, 'assets', 'scripts', 'script-a.js'), 'utf8'), js);
+  });
+
+  await check('leaves unreachable and hostile references alone', async () => {
+    const dir = scratch('mf-bad');
+    const page = [
+      '<!--\n Page saved with SingleFile \n url: https://site.test/ \n-->',
+      '<script>load(\'../../../etc/passwd.glb\')</script>',
+      '<script>load(\'data:model/gltf-binary;base64,AAAA.glb\')</script>',
+    ].join('\n');
+    fs.writeFileSync(path.join(dir, 'a.html'), page);
+    // site.test never resolves — downloads fail, references stay untouched.
+    const count = await fixModels(dir, 'https://site.test/', () => {});
+    eq(count, 0);
+    eq(fs.readFileSync(path.join(dir, 'a.html'), 'utf8'), page);
   });
 }
 
@@ -587,6 +695,19 @@ async function projectTests() {
     ok(!fresh.byPath(b), 'removed project stayed removed');
   });
 
+  await check('the 24/7 link record keeps when and from what it was pushed', () => {
+    const pa = projectsReg.byPath(a);
+    projectsReg.update(pa.id, {
+      deploy: { provider: 'netlify', siteId: 's1', url: 'https://x.netlify.app', at: '2026-09-03T00:00:00.000Z', version: 'v3' },
+    });
+    eq(projectsReg.byId(pa.id).deploy.at, '2026-09-03T00:00:00.000Z');
+    eq(projectsReg.byId(pa.id).deploy.version, 'v3');
+    projectsReg.update(pa.id, { deploy: { provider: 'netlify', siteId: 's1', url: 'https://x.netlify.app' } });
+    eq(projectsReg.byId(pa.id).deploy.at, null, 'no push time means none: ');
+    projectsReg.update(pa.id, { deploy: null });
+    eq(projectsReg.byId(pa.id).deploy, null);
+  });
+
   await check('refuses junk folders with a sentence, not a crash', async () => {
     await throws(() => projectsReg.addLocal(path.join(TMP, 'does-not-exist')), 'missing path');
     const file = path.join(scratch('prj-file'), 'x.txt');
@@ -796,13 +917,15 @@ async function reviewStoreTests() {
 
   const PRJ = 'prj_test01';
 
-  await check('a rating without a reason is rejected at the data layer', async () => {
-    await throws(() => reviewsStore.addAnnotation(PRJ, {
+  await check('a bare rating saves; only an entirely empty annotation is rejected', async () => {
+    const bare = reviewsStore.addAnnotation(PRJ, {
       scope: 'element', context: {}, input: { rating: 5 },
-    }), 'bare rating');
-    await throws(() => reviewsStore.addAnnotation(PRJ, {
+    });
+    eq(bare.input.rating, 5, 'bare rating saved: ');
+    const short = reviewsStore.addAnnotation(PRJ, {
       scope: 'element', context: {}, input: { rating: 5, why: 'too gray' },
-    }), 'why under 10 chars');
+    });
+    eq(short.input.why, 'too gray', 'short reason saved: ');
     await throws(() => reviewsStore.addAnnotation(PRJ, {
       scope: 'element', context: {}, input: {},
     }), 'entirely empty');
@@ -824,16 +947,44 @@ async function reviewStoreTests() {
     eq(again.reviewId, annotation.reviewId, 'same session: ');
   });
 
-  await check('update validates too — you cannot strip the reason from a rated note', async () => {
-    const [first] = reviewsStore.listAnnotations(PRJ);
-    await throws(() => reviewsStore.updateAnnotation(PRJ, first.id, { input: { why: '' } }), 'why removed');
+  await check('a guest cannot smuggle an SSRF url or a traversal path through context', () => {
+    // pageUrl is later appended to http://127.0.0.1:<port> and loaded; sourceFile
+    // is path.joined to the project folder and read. Both are guest-controlled
+    // over a share link, so both must be forced back into bounds at save time.
+    const ann = reviewsStore.addAnnotation(PRJ, {
+      scope: 'element',
+      context: {
+        selector: 'h1',
+        pageUrl: '@169.254.169.254/latest/meta-data/',
+        sourceFile: '../../../../Users/Gu/.ssh/id_rsa',
+      },
+      input: { rating: 4, severity: 'nitpick', axes: ['typography'], why: 'Testing the sanitizer bounds hold.', want: 'x' },
+    });
+    eq(ann.context.pageUrl, '/', 'authority-hijacking pageUrl neutralised: ' + ann.context.pageUrl);
+    eq(ann.context.sourceFile, '', 'climbing sourceFile rejected: ' + ann.context.sourceFile);
+    // Protocol-relative and backslash tricks fall back to root too; a real
+    // in-site path survives untouched.
+    const b = reviewsStore.addAnnotation(PRJ, {
+      scope: 'element',
+      context: { selector: 'h2', pageUrl: '//evil.com/x', sourceFile: 'about/index.html' },
+      input: { rating: 4, severity: 'nitpick', axes: ['typography'], why: 'Second sanitizer case, still fine.', want: 'x' },
+    });
+    eq(b.context.pageUrl, '/', 'protocol-relative pageUrl neutralised: ' + b.context.pageUrl);
+    eq(b.context.sourceFile, 'about/index.html', 'legitimate relative path preserved: ' + b.context.sourceFile);
+  });
+
+  await check('update validates too — and stripping the reason is allowed now', async () => {
+    const first = reviewsStore.listAnnotations(PRJ).find(a => a.input.rating === 3);
+    const stripped = reviewsStore.updateAnnotation(PRJ, first.id, { input: { why: '' } });
+    eq(stripped.input.why, '', 'reason removed without a fight: ');
+    reviewsStore.updateAnnotation(PRJ, first.id, { input: { why: 'Reads like body copy, no weight at all.' } });
     const patched = reviewsStore.updateAnnotation(PRJ, first.id, { input: { want: 'Near-black, 72px.' } });
     eq(patched.input.want, 'Near-black, 72px.');
     eq(patched.input.rating, 3, 'rating survived the patch: ');
   });
 
   await check('resolve keeps the old rating and records the new one', () => {
-    const [first] = reviewsStore.listAnnotations(PRJ);
+    const first = reviewsStore.listAnnotations(PRJ).find(a => a.input.rating === 3);
     const resolved = reviewsStore.updateAnnotation(PRJ, first.id, { resolved: true, resolvedRating: 8 });
     eq(resolved.resolved, true);
     eq(resolved.input.rating, 3, 'original rating intact: ');
@@ -1209,12 +1360,12 @@ async function reviewApiTests() {
       eq(res.json.checklists.map(c => c.id), ['a11y', 'responsive', 'prelaunch'], 'checklists ride along: ');
     });
 
-    await check('the no-reason rule surfaces as a 400, not a save', async () => {
+    await check('an empty annotation surfaces as a 400, not a save', async () => {
       const res = await request('POST', '/__siteslurp__/review/annotate', {
-        scope: 'element', context: { selector: 'h1.hero' }, input: { rating: 4 },
+        scope: 'element', context: { selector: 'h1.hero' }, input: {},
       });
       eq(res.status, 400);
-      ok(/reason/i.test(res.json.error), 'error mentions the reason: ' + res.json.error);
+      ok(/empty/i.test(res.json.error), 'error mentions emptiness: ' + res.json.error);
     });
 
     await check('a valid annotation round-trips through http', async () => {
@@ -1605,6 +1756,237 @@ async function pinnedServingTests() {
   }
 }
 
+/* ---------------- grab mode ---------------- */
+async function grabTests() {
+  console.log('\ngrab mode');
+
+  const site = scratch('grab-site');
+  fs.writeFileSync(path.join(site, 'index.html'),
+    '<html><body><section class="hero"><img src="assets/images/pic.webp"></section></body></html>');
+  fs.mkdirSync(path.join(site, 'assets', 'images'), { recursive: true });
+  fs.writeFileSync(path.join(site, 'assets', 'images', 'pic.webp'), 'not-really-webp');
+  const caps = scratch('grab-caps');
+
+  const manager = new GrabManager({
+    capturesRoot: () => caps,
+    clientPath: path.join(ROOT, 'renderer', 'grab-client.js'),
+  });
+  const hostMgr = new HostManager();
+  hostMgr.grabFor = (dir, opts) => manager.forDir(dir, opts);
+  const port = await hostMgr.start(site, 4790);
+
+  const request = (method, urlPath, body, headers = {}) => new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const req = http.request({
+      host: '127.0.0.1', port, path: urlPath, method,
+      headers: payload
+        ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload), ...headers }
+        : headers,
+    }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString();
+        let json = null;
+        try { json = JSON.parse(text); } catch { /* html page */ }
+        resolve({ status: res.statusCode, json, text });
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+
+  try {
+    await check('maps served paths back to files on disk', () => {
+      eq(localPathFor(site, '/assets/images/pic.webp'), path.join(site, 'assets', 'images', 'pic.webp'));
+      eq(localPathFor(site, '/a%20b/c.png'), path.join(site, 'a b', 'c.png'));
+      // Same resolution as the static handler: traversal clamps at the site
+      // root instead of escaping — the path names what the server would serve.
+      eq(localPathFor(site, '/../../evil.txt'), path.join(site, 'evil.txt'), 'traversal clamps: ');
+      eq(localPathFor(site, '/%2e%2e/%2e%2e/evil.txt'), path.join(site, 'evil.txt'), 'encoded traversal clamps: ');
+      eq(localPathFor(site, '/%zz-bad-encoding'), null, 'undecodable -> null');
+    });
+
+    await check('injects the grab client and serves it with this site\'s config', async () => {
+      const page = await request('GET', '/');
+      ok(page.text.includes('/__siteslurp__/grab/client.js'), 'tag injected');
+      const script = await request('GET', '/__siteslurp__/grab/client.js');
+      eq(script.status, 200);
+      ok(script.text.startsWith('self.__SLURP_GRAB__ = {'), 'config preamble');
+      const cfg = JSON.parse(/^self\.__SLURP_GRAB__ = (.*);\n/.exec(script.text)[1]);
+      eq(cfg.root, site);
+      eq(cfg.mapped, true);
+      eq(cfg.grabs, path.join(caps, '_grabs', 'grab-site'));
+      ok(script.text.includes('__slurpGrab'), 'client body');
+    });
+
+    await check('save writes a bundle: manifest, html, css, derived asset paths', async () => {
+      const res = await request('POST', '/__siteslurp__/grab/save', {
+        slug: 'section-hero-test1',
+        pageUrl: `http://127.0.0.1:${port}/`,
+        selector: 'body > section.hero',
+        tag: 'section.hero',
+        rect: { x: 0, y: 80, w: 1280, h: 640 },
+        html: '<section class="hero"><img src="assets/images/pic.webp"></section>',
+        css: '.hero { color: red; }',
+        assets: [
+          `http://127.0.0.1:${port}/assets/images/pic.webp`,
+          'https://cdn.example.com/far-away.png',
+        ],
+      });
+      eq(res.status, 200);
+      const folder = path.join(caps, '_grabs', 'grab-site', 'section-hero-test1');
+      eq(res.json.folder, folder);
+      ok(fs.readFileSync(path.join(folder, 'element.html'), 'utf8').includes('pic.webp'), 'element.html');
+      ok(fs.readFileSync(path.join(folder, 'styles.css'), 'utf8').includes('.hero'), 'styles.css');
+      const md = fs.readFileSync(path.join(folder, 'GRAB.md'), 'utf8');
+      ok(md.includes(`Site folder: ${site}`), 'site folder in manifest');
+      ok(md.includes(`Page file: ${path.join(site, 'index.html')}`), 'page resolved to its file');
+      ok(md.includes(path.join(site, 'assets', 'images', 'pic.webp')), 'local twin of the asset');
+      ok(md.includes('far-away.png (remote — no local copy)'), 'remote asset marked');
+    });
+
+    await check('refuses hostile bundle names', async () => {
+      for (const slug of ['../evil', 'a/b', 'a\\b', '', '-lead', 'x'.repeat(90)]) {
+        const res = await request('POST', '/__siteslurp__/grab/save', { slug, html: 'x' });
+        eq(res.status, 400, `slug ${JSON.stringify(slug)} refused`);
+      }
+      ok(!fs.existsSync(path.join(caps, '_grabs', 'evil')), 'nothing written outside the site\'s grabs folder');
+    });
+
+    await check('refuses cross-origin saves', async () => {
+      const res = await request('POST', '/__siteslurp__/grab/save',
+        { slug: 'from-elsewhere1', html: 'x' }, { Origin: 'http://evil.example' });
+      eq(res.status, 403);
+    });
+
+    await check('stays local-only: tunnel traffic gets no injection and no API', async () => {
+      const page = await request('GET', '/', null, { 'cf-ray': 'abc123' });
+      ok(!page.text.includes('grab/client.js'), 'no tag through the tunnel');
+      const api = await request('GET', '/__siteslurp__/grab/client.js', null, { 'cf-ray': 'abc123' });
+      eq(api.status, 404);
+    });
+  } finally {
+    hostMgr.stopAll();
+  }
+}
+
+/* ---------------- in-page menu ---------------- */
+async function menuTests() {
+  console.log('\nin-page menu');
+
+  const site = scratch('menu-site');
+  fs.writeFileSync(path.join(site, 'index.html'), '<html><body><h1>hi</h1></body></html>');
+
+  // Stub deps standing in for main.js: one flag plays the review manager.
+  let auditOn = false;
+  const manager = new MenuManager({
+    clientPath: path.join(ROOT, 'renderer', 'slurp-menu.js'),
+    logoPath: path.join(ROOT, 'renderer', 'slurp-logo.png'),
+    siteFor: dir => ({
+      name: 'menu-site', auditAvailable: dir === site, auditActive: auditOn,
+      reason: dir === site ? null : 'not a project',
+    }),
+    auditStart: dir => {
+      if (dir !== site) throw new Error('This folder is not a library project — audit mode needs one.');
+      auditOn = true;
+    },
+    auditStop: () => { const was = auditOn; auditOn = false; return was; },
+  });
+  const hostMgr = new HostManager();
+  hostMgr.menuFor = dir => manager.forDir(dir);
+  const port = await hostMgr.start(site, 4785);
+
+  const request = (method, urlPath, headers = {}) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: urlPath, method, headers }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        let json = null;
+        try { json = JSON.parse(buf.toString()); } catch { /* html or binary */ }
+        resolve({ status: res.statusCode, headers: res.headers, json, text: buf.toString(), buf });
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+
+  try {
+    await check('injects the menu client into hosted pages', async () => {
+      const page = await request('GET', '/');
+      ok(page.text.includes('/__siteslurp__/menu/client.js'), 'menu tag injected');
+    });
+
+    await check('serves the client with this site\'s config', async () => {
+      const script = await request('GET', '/__siteslurp__/menu/client.js');
+      eq(script.status, 200);
+      ok(script.text.startsWith('self.__SLURP_MENU__ = {'), 'config preamble');
+      const cfg = JSON.parse(/^self\.__SLURP_MENU__ = (.*);\n/.exec(script.text)[1]);
+      eq(cfg.name, 'menu-site');
+      eq(cfg.audit.available, true);
+      eq(cfg.audit.active, false);
+      ok(script.text.includes('__slurpMenu'), 'client body');
+    });
+
+    await check('serves the logo as a real png', async () => {
+      const res = await request('GET', '/__siteslurp__/menu/logo.png');
+      eq(res.status, 200);
+      eq(res.headers['content-type'], 'image/png');
+      eq([...res.buf.subarray(0, 4)], [0x89, 0x50, 0x4E, 0x47], 'PNG magic: ');
+    });
+
+    await check('audit toggles on and off through the menu API', async () => {
+      eq((await request('POST', '/__siteslurp__/menu/audit/start')).status, 200);
+      eq(auditOn, true, 'audit enabled: ');
+      const state = await request('GET', '/__siteslurp__/menu/state');
+      eq(state.json.audit.active, true);
+      const stop = await request('POST', '/__siteslurp__/menu/audit/stop');
+      eq(stop.json.stopped, true);
+      eq(auditOn, false, 'audit disabled: ');
+    });
+
+    await check('a start that the app refuses comes back as a sentence', async () => {
+      const other = scratch('menu-other');
+      fs.writeFileSync(path.join(other, 'index.html'), '<p>x</p>');
+      const otherMgr = new HostManager();
+      otherMgr.menuFor = dir => manager.forDir(dir);
+      const otherPort = await otherMgr.start(other, 4795);
+      try {
+        const res = await new Promise((resolve, reject) => {
+          const req = http.request({ host: '127.0.0.1', port: otherPort, path: '/__siteslurp__/menu/audit/start', method: 'POST' }, r => {
+            const chunks = [];
+            r.on('data', c => chunks.push(c));
+            r.on('end', () => resolve({ status: r.statusCode, json: JSON.parse(Buffer.concat(chunks).toString()) }));
+          });
+          req.on('error', reject);
+          req.end();
+        });
+        eq(res.status, 400);
+        ok(/library project/.test(res.json.error), 'reason given: ' + res.json.error);
+      } finally {
+        otherMgr.stopAll();
+      }
+    });
+
+    await check('refuses cross-origin calls', async () => {
+      const res = await request('POST', '/__siteslurp__/menu/audit/start', { Origin: 'http://evil.example' });
+      eq(res.status, 403);
+      eq(auditOn, false, 'nothing flipped: ');
+    });
+
+    await check('stays local-only: tunnel traffic gets no menu', async () => {
+      const page = await request('GET', '/', { 'cf-ray': 'abc123' });
+      ok(!page.text.includes('menu/client.js'), 'no tag through the tunnel');
+      const api = await request('GET', '/__siteslurp__/menu/client.js', { 'cf-ray': 'abc123' });
+      eq(api.status, 404);
+    });
+  } finally {
+    hostMgr.stopAll();
+  }
+}
+
 /* ---------------- misc ---------------- */
 async function miscTests() {
   console.log('\nurl + settings');
@@ -1736,6 +2118,30 @@ async function runtimeTests() {
     eq(found.root, 'dist');
   });
 
+  // People drop the folder above the app all the time — the client folder,
+  // not the Next.js project inside it. One level down still counts.
+  await check('the folder above the app finds the app — one level down, as root', () => {
+    const parent = scratch('rt-parent');
+    write(parent, path.join('MyApp', 'package.json'), JSON.stringify({
+      dependencies: { next: '16.2.6' }, scripts: { dev: 'next dev' },
+    }));
+    const found = runtimes.detect(parent);
+    eq(found.id, 'next');
+    eq(found.root, 'MyApp');
+    ok(found.label.includes('MyApp'), 'label says where: ' + found.label);
+    const kept = runtimes.normalize(found);
+    eq(kept.root, 'MyApp', 'root survives normalize for command runtimes');
+    ok(runtimes.needsInstall(parent, kept), 'no node_modules yet');
+    fs.mkdirSync(path.join(parent, 'MyApp', 'node_modules'), { recursive: true });
+    ok(!runtimes.needsInstall(parent, kept), 'install satisfied in the subfolder');
+    // But a folder that is served fine by itself never reaches into subfolders.
+    const own = write(scratch('rt-own-first'), 'index.html', '<h1>hi</h1>');
+    write(own, path.join('app', 'package.json'), JSON.stringify({
+      dependencies: { vite: '5' }, scripts: { dev: 'vite' },
+    }));
+    eq(runtimes.detect(own).kind, 'static');
+  });
+
   await check('nothing recognisable means no runtime, not a wrong guess', () => {
     eq(runtimes.detect(scratch('rt-nothing')), null);
   });
@@ -1790,6 +2196,47 @@ async function runtimeTests() {
         alive = await portAnswers(child, 200);
       }
       ok(!alive, `child on ${child} outlived the host`);
+    } finally {
+      hostMgr.stopAll();
+    }
+  });
+
+  // Restart used to no-op: stop() left this.child set, so the immediate start()
+  // bailed on its own guard and the site came back "failed". It must actually
+  // respawn and serve again.
+  await check('restart brings the dev server back, it does not leave it dead', async () => {
+    const dir = scratch('rt-restart');
+    write(dir, 'server.js', `
+      const http = require('http');
+      http.createServer((req, res) => { res.writeHead(200); res.end('pid ' + process.pid); })
+        .listen(Number(process.argv[2]), '127.0.0.1');
+    `);
+    const hostMgr = new HostManager();
+    const port = await hostMgr.start(dir, 4392, {
+      runtime: { kind: 'command', id: 'custom', label: 'test', command: 'node server.js {port}' }, name: 'test',
+    });
+    const get = () => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/', headers: { accept: 'text/html' } }, res => {
+        const chunks = []; res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
+      });
+      req.on('error', reject); req.end();
+    });
+    const waitReady = async () => {
+      for (let i = 0; i < 100 && hostMgr.runtimeState(dir).status !== 'ready'; i++) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return hostMgr.runtimeState(dir).status;
+    };
+    try {
+      eq(await waitReady(), 'ready', 'came up first time');
+      const before = (await get()).body;
+      const restarted = await hostMgr.restart(dir);
+      ok(restarted, 'restart reported success');
+      eq(await waitReady(), 'ready', 'came back after restart');
+      const after = (await get()).body;
+      ok(/^pid \d+$/.test(after), 'serving again after restart: ' + after);
+      ok(before !== after, 'a genuinely new process answered: ' + before + ' -> ' + after);
     } finally {
       hostMgr.stopAll();
     }
@@ -1864,6 +2311,71 @@ async function runtimeTests() {
     } finally {
       manager.disable(dir);
       hostMgr.stopAll();
+    }
+  });
+
+  // Next 16 binds its port and prints "Ready" before noticing another `next
+  // dev` already owns the folder — then exits. Trusting the first port answer
+  // marked that corpse ready and every proxied request died with ECONNRESET.
+  await check('a server that binds its port and then exits is failed, not ready', async () => {
+    const dir = scratch('rt-dup');
+    write(dir, 'server.js', `
+      const http = require('http');
+      http.createServer(() => {}).listen(Number(process.argv[2]), '127.0.0.1', () => {
+        console.log('Ready in 100ms');
+        console.log('Another next dev server is already running.');
+        console.log('- PID:          31337');
+        setTimeout(() => process.exit(1), 150);
+      });
+    `);
+    const port = await freePort();
+    const runner = new Runner({ command: `node server.js ${port}`, cwd: dir, port });
+    runner.start();
+    try {
+      // Wait for the child to be fully gone — the PID line can land a chunk
+      // after the announcement, and the exit pass folds it into the message.
+      for (let attempt = 0; attempt < 100 && (runner.status === 'starting' || runner.child); attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      eq(runner.status, 'failed', 'bound-then-died is a failure: ');
+      ok(runner.message.includes('already running'), 'names the duplicate: ' + runner.message);
+      ok(runner.message.includes('31337'), 'carries the PID: ' + runner.message);
+      ok(runner.message.includes('just connect'), 'offers attach mode: ' + runner.message);
+    } finally {
+      runner.stop();
+    }
+  });
+
+  // The request that discovers the crash must show the child's exit story,
+  // not a bare ECONNRESET — and the failed page keeps refreshing so fixing
+  // the cause and restarting heals the tab on its own.
+  await check('a reset mid-flight reports the real exit, and the page self-heals', async () => {
+    const deadPort = await freePort(); // nothing listening there
+    const states = [
+      { status: 'ready', port: deadPort },
+      { status: 'failed', port: deadPort, message: 'The server exited (code 1)', log: 'Run taskkill /PID 31337 /F to stop it.' },
+    ];
+    let calls = 0;
+    const { handler } = makeProxyHandler(() => states[Math.min(calls++, 1)], { name: 'dup' });
+    const front = http.createServer(handler);
+    await new Promise(resolve => front.listen(0, '127.0.0.1', resolve));
+    const port = front.address().port;
+    try {
+      const res = await new Promise((resolve, reject) => {
+        http.get({ host: '127.0.0.1', port, path: '/', headers: { accept: 'text/html' } }, r => {
+          const chunks = [];
+          r.on('data', c => chunks.push(c));
+          r.on('end', () => resolve({ status: r.statusCode, body: Buffer.concat(chunks).toString() }));
+        }).on('error', reject);
+      });
+      eq(res.status, 503);
+      ok(res.body.includes('The server exited (code 1)'), 'shows the exit message: ' + res.body.slice(0, 400));
+      ok(res.body.includes('taskkill'), 'shows the log tail');
+      ok(!res.body.includes('Lost connection'), 'no bare ECONNRESET when the truth is known');
+      ok(res.body.includes('http-equiv="refresh"'), 'failed page still refreshes itself');
+    } finally {
+      front.close();
+      front.closeAllConnections?.();
     }
   });
 
@@ -2724,8 +3236,15 @@ async function guestReviewTests() {
       eq(good.status, 302);
       ok(good.headers['set-cookie'].some(c => c.startsWith(`__ss_guest=${token}`)), 'cookie set: '
         + JSON.stringify(good.headers['set-cookie']));
+      // A wrong or junk token is ignored — never turned into a cookie op and
+      // never a redirect off the page.
       const bad = await request('GET', `/?review=${'0'.repeat(32)}`, null, edge);
-      ok(bad.headers['set-cookie'].some(c => c.includes('Max-Age=0')), 'a wrong token clears instead');
+      ok(!bad.headers['set-cookie'], 'a wrong token sets no cookie: ' + JSON.stringify(bad.headers['set-cookie']));
+      // Regression: a coincidental ?review= on an in-site link used to wipe a
+      // guest who already held a valid cookie. It must not.
+      const survives = await request('GET', '/page?review=notatoken', null, { ...edge, cookie: `__ss_guest=${token}` });
+      const wiped = (survives.headers['set-cookie'] || []).some(c => c.includes('Max-Age=0'));
+      ok(!wiped, 'an existing guest capability survives a junk review param');
     });
 
     const asGuest = extra => ({ ...edge, cookie: `__ss_guest=${token}`, ...extra });
@@ -2961,6 +3480,7 @@ async function sharingPowerTests() {
   console.log(`SiteSlurp checks  (scratch: ${TMP})`);
   await paletteTests();
   await extractTests();
+  await modelfixTests();
   await zipTests();
   await serverTests();
   await entryTests();
@@ -2983,6 +3503,8 @@ async function sharingPowerTests() {
   await capturePowerTests();
   await guestReviewTests();
   await sharingPowerTests();
+  await grabTests();
+  await menuTests();
   await miscTests();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

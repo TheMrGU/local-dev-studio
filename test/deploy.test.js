@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { adapterFor, listAdapters, runDeploy } = require('../lib/deploy');
+const { adapterFor, listAdapters, runDeploy, runRemove, siteNameFor } = require('../lib/deploy');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'siteslurp-deploytest-'));
 const zipPath = path.join(TMP, 'site.zip');
@@ -85,6 +85,53 @@ test('a missing token fails before any network call', async () => {
   const transport = async () => { throw new Error('must not be called'); };
   await assert.rejects(
     () => runDeploy({ provider: 'netlify', zipPath, token: '', transport }),
+    /access token/);
+});
+
+test('a fresh site is asked for by name, and a taken name falls back to Netlify\'s pick', async () => {
+  const bodies = [];
+  const transport = async req => {
+    if (req.path === '/api/v1/sites') {
+      bodies.push(req.body);
+      return bodies.length === 1
+        ? { status: 422, json: { errors: { subdomain: ['must be unique'] } } }
+        : { status: 201, json: { id: 'site_n' } };
+    }
+    if (req.path === '/api/v1/sites/site_n/deploys') {
+      return { status: 200, json: { id: 'dep_n', state: 'ready', ssl_url: 'https://random-words.netlify.app' } };
+    }
+    throw new Error('unexpected call ' + req.path);
+  };
+  const result = await runDeploy({ provider: 'netlify', zipPath, token: 'tok', name: 'my-site-ab12', transport, pollMs: 1 });
+  assert.deepEqual(bodies, [{ name: 'my-site-ab12' }, {}], 'named first, nameless on refusal');
+  assert.equal(result.siteId, 'site_n');
+  assert.equal(result.url, 'https://random-words.netlify.app');
+});
+
+test('siteNameFor makes a subdomain-safe slug with a random tail, or nothing', () => {
+  assert.match(siteNameFor('Zentrix Media — Portfolio!'), /^zentrix-media-portfolio-[0-9a-f]{4}$/);
+  assert.equal(siteNameFor('!!!'), null);
+  assert.equal(siteNameFor(''), null);
+  assert.ok(siteNameFor('x'.repeat(80)).length <= 45, 'long names are cut before the tail');
+});
+
+test('taking a site down deletes it, and an already-gone site counts as down', async () => {
+  const calls = [];
+  const transport = async req => { calls.push(`${req.method} ${req.path}`); return { status: 204, json: null }; };
+  assert.deepEqual(await runRemove({ provider: 'netlify', siteId: 'site_9', token: 'tok', transport }), { gone: true });
+  assert.deepEqual(calls, ['DELETE /api/v1/sites/site_9']);
+  const gone = async () => ({ status: 404, json: { message: 'Not Found' } });
+  assert.deepEqual(await runRemove({ provider: 'netlify', siteId: 'site_9', token: 'tok', transport: gone }), { gone: true });
+});
+
+test('taking a site down with a bad token says so; with no token it never calls out', async () => {
+  const transport = async () => ({ status: 401, json: { message: 'Unauthorized' } });
+  await assert.rejects(
+    () => runRemove({ provider: 'netlify', siteId: 'site_9', token: 'expired', transport }),
+    /rejected the token/);
+  const never = async () => { throw new Error('must not be called'); };
+  await assert.rejects(
+    () => runRemove({ provider: 'netlify', siteId: 'site_9', token: '', transport: never }),
     /access token/);
 });
 

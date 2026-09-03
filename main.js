@@ -42,6 +42,9 @@ const { scanPalette, applyColor, undoColor, listUndo, parseColor, toHex } = requ
 const versions = require('./lib/versions');
 const { diffSegments } = require('./lib/diff');
 const { fixVideos } = require('./lib/videofix');
+const { fixModels } = require('./lib/modelfix');
+const { GrabManager } = require('./lib/grab');
+const { MenuManager } = require('./lib/menu');
 const { zipFolder, zipFiles } = require('./lib/zip');
 const { listLibrary, describeLocal, invalidate } = require('./lib/library');
 const projects = require('./lib/projects');
@@ -58,7 +61,7 @@ const audits = require('./lib/audits');
 // [PRO] sharing power: guest review over share links, local https, deploy.
 const { GuestManager } = require('./lib/guest');
 const certs = require('./lib/certs');
-const { runDeploy, adapterFor } = require('./lib/deploy');
+const { runDeploy, runRemove, siteNameFor, adapterFor } = require('./lib/deploy');
 const secrets = require('./lib/secrets');
 const { StudioBrowsers } = require('./lib/studioBrowser');
 const { captureAnnotationShots } = require('./lib/shots');
@@ -148,6 +151,50 @@ const reviewManager = new ReviewManager({
   },
 });
 hosts.reviewRouter = dir => reviewManager.forDir(dir);
+
+// ---------- grab mode ----------
+// Always on for locally hosted sites: hold Alt in the browser and drag any
+// element out — media drops its file's path on disk, anything else drops the
+// path of a bundle (HTML + matching CSS + asset locations) written on demand
+// to <capturesRoot>/_grabs/. Built for feeding context to CLI agents.
+const grabManager = new GrabManager({
+  capturesRoot: () => settings.load().capturesRoot,
+  clientPath: path.join(__dirname, 'renderer', 'grab-client.js'),
+});
+hosts.grabFor = (dir, opts) => grabManager.forDir(dir, opts);
+
+// ---------- in-page menu ----------
+// Every locally hosted page gets the SiteSlurp menu: a small button that opens
+// the in-page tools as toggles. Audit mode used to need its own button on the
+// Studio card; now it flips on from the page itself, hosting-style.
+const menuManager = new MenuManager({
+  clientPath: path.join(__dirname, 'renderer', 'slurp-menu.js'),
+  logoPath: path.join(__dirname, 'renderer', 'slurp-logo.png'),
+  siteFor: dir => {
+    const project = projects.byPath(dir);
+    return {
+      name: project ? project.name : path.basename(dir),
+      auditAvailable: !!project,
+      auditActive: reviewManager.isActive(dir),
+      reason: project ? null : 'This folder is not a library project yet — add it to Studio first.',
+    };
+  },
+  auditStart: dir => {
+    const project = projects.byPath(dir);
+    if (!project) throw new Error('This folder is not a library project — audit mode needs one.');
+    reviewManager.enable(dir, project.id);
+    log.info('audit on (in-page menu)', dir);
+    send('ui:refresh');
+  },
+  auditStop: dir => {
+    const stopped = reviewManager.disable(dir);
+    if (stopped) log.info('audit off (in-page menu)', dir);
+    send('ui:refresh');
+    return stopped;
+  },
+});
+hosts.menuFor = dir => menuManager.forDir(dir);
+
 // ---------- [PRO] guest review ----------
 // A share link's visitors are locked out of all review tooling (invariant 12)
 // unless the share was started with guest review on — then a per-share token
@@ -173,6 +220,31 @@ hosts.guestRouter = dir => guests.forDir(dir);
 // in the guest manager. A pinned link without guest review needs no token at
 // all — ?v= is an ordinary pin cookie any visitor may hold.
 const shareLinks = new Map(); // dir -> { version }
+
+// Shares the user turned on, remembered on disk so an app restart (or a PC
+// reboot) brings them back up automatically. A quick tunnel can't outlive the
+// machine — what persists is the *intent*; every restore mints a fresh link
+// and a fresh guest token. Written on share:start, cleared by share:stop and
+// host:stop — never by quit, which is exactly the memory that must survive.
+const savedSharesFile = () => path.join(app.getPath('userData'), 'shares.json');
+function loadSavedShares() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(savedSharesFile(), 'utf8'));
+    return Array.isArray(raw.shares) ? raw.shares.filter(s => s && typeof s.dir === 'string') : [];
+  } catch { return []; }
+}
+function saveSavedShares(list) {
+  try { fs.writeFileSync(savedSharesFile(), JSON.stringify({ shares: list }, null, 2)); }
+  catch (err) { log.warn('share memory', err.message); }
+}
+function rememberShare(dir, { guestReview = false, version = null } = {}) {
+  const list = loadSavedShares().filter(s => s.dir !== dir);
+  list.push({ dir, guestReview: !!guestReview, version: version || null });
+  saveSavedShares(list);
+}
+function forgetShare(dir) {
+  saveSavedShares(loadSavedShares().filter(s => s.dir !== dir));
+}
 
 /** Sharing stops as one unit: the tunnel goes down, the guest token dies and
  *  the link options are forgotten — a dead link is completely dead. */
@@ -609,7 +681,8 @@ function resolveCaptureOptions(opts) {
   // clamped/sanitized by the one place that knows how (invariant 6).
   const saved = settings.save({
     crawl: !!opts.crawl, depth: opts.depth, mobile: !!opts.mobile,
-    fixVideos: opts.fixVideos !== false, headless: opts.headless !== false,
+    fixVideos: opts.fixVideos !== false, keepScripts: !!opts.keepScripts,
+    headless: opts.headless !== false,
     stripBanners: !!opts.stripBanners, waitDelay: opts.waitDelay || 0,
     scrollPage: !!opts.scrollPage, useProfile: !!opts.useProfile,
     cookiesFile: typeof opts.cookiesFile === 'string' ? opts.cookiesFile.trim() : '',
@@ -620,7 +693,7 @@ function resolveCaptureOptions(opts) {
   });
   return {
     crawl: saved.crawl, depth: saved.depth, mobile: saved.mobile,
-    fixVideos: saved.fixVideos, headless: saved.headless,
+    fixVideos: saved.fixVideos, keepScripts: saved.keepScripts, headless: saved.headless,
     stripBanners: saved.stripBanners, waitDelay: saved.waitDelay,
     scrollPage: saved.scrollPage, useProfile: saved.useProfile,
     cookiesFile: saved.cookiesFile, headers: parseHeaderLines(saved.captureHeaders),
@@ -645,6 +718,8 @@ function captureOptionsFrom(manifest) {
     depth: pick('depth', manifest.depth, current.depth),
     mobile: !!pick('mobile', manifest.mobile, false),
     fixVideos: pick('fixVideos', undefined, current.fixVideos) !== false,
+    // Older manifests recorded keepScripts at the top level, not in captureOptions.
+    keepScripts: !!pick('keepScripts', manifest.keepScripts, current.keepScripts),
     headless: pick('headless', undefined, current.headless) !== false,
     stripBanners: !!pick('stripBanners', undefined, current.stripBanners),
     waitDelay: pick('waitDelay', undefined, 0) || 0,
@@ -699,7 +774,7 @@ async function runCapture(opts) {
     if (co.sitemap) pageList = await sitemapPageList(url, co, controller.signal);
 
     send('run:status', { phase: 'capture', msg: `Capturing ${url}` });
-    log.info('capture start', url, JSON.stringify({ crawl: co.crawl, depth: co.depth, mobile: co.mobile, sitemap: co.sitemap }));
+    log.info('capture start', url, JSON.stringify({ crawl: co.crawl, depth: co.depth, mobile: co.mobile, sitemap: co.sitemap, keepScripts: co.keepScripts }));
 
     const rawDir = await captureSite({
       url,
@@ -722,6 +797,10 @@ async function runCapture(opts) {
     const outDir = uniqueOutDir(rawDir + '_extracted');
     // suppressAuto: extraction churn must not read as the user editing.
     const stats = await versions.suppressAuto(() => extractSite(rawDir, outDir, {
+      // A capture made with scripts kept needs its reveal styles left alone —
+      // the kept scripts animate them; tearing them out blanks the page.
+      keepHiddenStyles: !!co.keepScripts,
+      signal: controller.signal,
       onProgress: p => send('run:progress', p),
     }, runLog));
     runLog(`  ${stats.pages} pages | ${stats.css} css | ${stats.images} images | ${stats.fonts} fonts`);
@@ -732,6 +811,14 @@ async function runCapture(opts) {
       send('run:status', { phase: 'videos', msg: 'Restoring stripped videos' });
       const fixed = await versions.suppressAuto(() => fixVideos(outDir, runLog));
       if (fixed) runLog(`  restored ${fixed} video(s)`);
+    }
+    if (co.keepScripts) {
+      // Kept scripts fetch assets at runtime (3D payloads, lazy galleries) that
+      // SingleFile never saw — mirror them so the local copy stands alone.
+      send('run:status', { phase: 'models', msg: 'Fetching 3D assets' });
+      const models = await versions.suppressAuto(() => fixModels(outDir, url, runLog))
+        .catch(err => { log.warn('modelfix', err); return 0; });
+      if (models) runLog(`  mirrored ${models} runtime asset(s)`);
     }
 
     send('run:status', { phase: 'thumb', msg: 'Rendering preview' });
@@ -761,19 +848,28 @@ async function runExtract(rawDir, { overwrite = false } = {}) {
   try {
     const base = rawDir.replace(/[\\/]+$/, '') + '_extracted';
     const outDir = overwrite ? base : uniqueOutDir(base);
+    // Overwriting a folder that is being served would fight the server for
+    // file locks on Windows — stop hosting it first; the card just re-hosts.
+    if (overwrite && hosts.portFor(outDir)) hosts.stop(outDir);
+    const manifest = readManifest(rawDir) || {};
     send('run:status', { phase: 'extract', msg: 'Extracting into editable files' });
     // suppressAuto: an overwrite extract rewrites a folder that may be hosted
     // with the idle watcher listening — that churn is ours, not an edit.
     const stats = await versions.suppressAuto(() => extractSite(rawDir, outDir, {
       overwrite,
+      keepHiddenStyles: !!manifest.keepScripts,
       signal: controller.signal,
       onProgress: p => send('run:progress', p),
     }, runLog));
-    const manifest = readManifest(rawDir) || {};
     writeManifest(outDir, { ...manifest, kind: 'extracted', source: rawDir });
 
     send('run:status', { phase: 'videos', msg: 'Restoring stripped videos' });
     await versions.suppressAuto(() => fixVideos(outDir, runLog)).catch(err => log.warn('videofix', err));
+    if (manifest.keepScripts && manifest.url) {
+      send('run:status', { phase: 'models', msg: 'Fetching 3D assets' });
+      await versions.suppressAuto(() => fixModels(outDir, manifest.url, runLog))
+        .catch(err => log.warn('modelfix', err));
+    }
     send('run:status', { phase: 'thumb', msg: 'Rendering preview' });
     await makeThumb(outDir);
 
@@ -877,6 +973,7 @@ async function runRecapture(project) {
     send('run:status', { phase: 'extract', msg: 'Extracting into editable files' });
     const outDir = uniqueOutDir(rawDir + '_extracted');
     const stats = await versions.suppressAuto(() => extractSite(rawDir, outDir, {
+      keepHiddenStyles: !!co.keepScripts,
       signal: controller.signal,
       onProgress: p => send('run:progress', p),
     }, runLog));
@@ -905,6 +1002,11 @@ async function runRecapture(project) {
       send('run:status', { phase: 'videos', msg: 'Restoring stripped videos' });
       const fixed = await versions.suppressAuto(() => fixVideos(project.path, runLog)).catch(() => 0);
       if (fixed) runLog(`  restored ${fixed} video(s)`);
+    }
+    if (co.keepScripts) {
+      send('run:status', { phase: 'models', msg: 'Fetching 3D assets' });
+      await versions.suppressAuto(() => fixModels(project.path, manifest.url, runLog))
+        .catch(err => log.warn('modelfix', err));
     }
 
     send('run:status', { phase: 'thumb', msg: 'Rendering preview' });
@@ -1161,7 +1263,8 @@ function registerIpc() {
     const claimed = claimJob('Installing dependencies');
     send('run:status', { phase: 'install', msg: `Installing dependencies for ${project.name}` });
     try {
-      await runOnce(runtime.install, project.path, runLog);
+      // A runtime detected one level down installs there too.
+      await runOnce(runtime.install, runtime.root ? path.join(project.path, runtime.root) : project.path, runLog);
       runLog('  dependencies installed');
       send('run:done', { ok: true, install: true, dir: project.path });
       return true;
@@ -1178,9 +1281,9 @@ function registerIpc() {
     return hosts.runtimeState(dir);
   });
 
-  handle('runtime:restart', ({ dir }) => {
+  handle('runtime:restart', async ({ dir }) => {
     assertManaged(dir, 'The site folder');
-    if (!hosts.restart(dir)) throw new Error('That site has no process to restart.');
+    if (!await hosts.restart(dir)) throw new Error('That site has no process to restart.');
     log.info('runtime restart', dir);
     return true;
   });
@@ -1413,6 +1516,56 @@ function registerIpc() {
     };
   });
 
+  // "Import audit…" from the history modal: the offline half of guest review.
+  // A guest who couldn't reach the tunnel (or whose link died before their
+  // notes were seen) downloads an audit file from the overlay and sends it any
+  // way they like; this reads it back into the project's open review. Notes
+  // that already arrived live carry the same server-minted ids and are skipped,
+  // so importing a file on top of a live session never duplicates anything.
+  handle('review:import', async ({ id }) => {
+    const project = projects.byId(id);
+    if (!project) throw new Error('Unknown project.');
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Import an audit file',
+      properties: ['openFile'],
+      filters: [{ name: 'SiteSlurp audit', extensions: ['json'] }],
+    });
+    if (res.canceled || !res.filePaths[0]) return null;
+    let raw;
+    try { raw = JSON.parse(fs.readFileSync(res.filePaths[0], 'utf8')); } catch {
+      throw new Error('That file isn\'t readable JSON.');
+    }
+    if (!raw || raw.siteslurpAudit !== 1 || !Array.isArray(raw.annotations)) {
+      throw new Error('That file isn\'t a SiteSlurp audit export — guests download one from the review bar\'s "Send audit".');
+    }
+    // A note is a duplicate when the store already has its id (it arrived live
+    // over the tunnel) or has imported it before (same file, second pass).
+    const seen = new Set(reviews.listAnnotations(project.id)
+      .flatMap(a => [a.id, a.importedFrom].filter(Boolean)));
+    let imported = 0, skipped = 0;
+    for (const note of raw.annotations.slice(0, 500)) {
+      if (!note || typeof note !== 'object') { skipped += 1; continue; }
+      if (note.id && seen.has(String(note.id))) { skipped += 1; continue; }
+      try {
+        const annotation = reviews.addAnnotation(project.id, {
+          scope: note.scope,
+          context: note.context,
+          input: note.input,
+          author: (note.author && note.author !== 'me' ? note.author : raw.author) || 'Guest',
+          importedFrom: note.id || '',
+        });
+        enrichAnnotation(project, annotation);
+        imported += 1;
+      } catch (err) {
+        skipped += 1;
+        log.warn('audit import: note skipped', err.message);
+      }
+    }
+    log.info('audit imported', project.path, `${imported} in, ${skipped} skipped`);
+    send('ui:refresh');
+    return { imported, skipped };
+  });
+
   handle('calibration:promote', ({ text }) => calibration.addStandingPreference(text));
 
   // ---------- calibration manager ----------
@@ -1597,12 +1750,14 @@ function registerIpc() {
   });
 
   handle('host:stop', ({ dir }) => {
+    forgetShare(dir);
     stopShare(dir);
     reviewManager.disable(dir);
     return hosts.stop(dir);
   });
   handle('host:stopAll', () => {
     for (const { dir } of hosts.list()) reviewManager.disable(dir);
+    saveSavedShares([]);
     stopAllShares();
     hosts.stopAll();
     return true;
@@ -1615,12 +1770,22 @@ function registerIpc() {
   // [PRO] options: guestReview mints a capability token that lets visitors
   // annotate (and only annotate); version pins the link to a snapshot so
   // reviewers see a fixed state while work continues on live.
-  handle('share:start', async ({ dir, guestReview = false, version = null }) => {
+  handle('share:start', async ({ dir, mode = 'tunnel', guestReview = false, version = null }) => {
     assertManaged(dir, 'The site folder');
+    const project = projects.byPath(dir);
+
+    // The 24/7 link: the files go to a real host, so the link outlives this
+    // machine — nothing here needs the site hosted, or the app open after.
+    if (mode === 'cloud') {
+      if (!project) throw new Error('A 24/7 link needs a project in the library — this folder is only hosted.');
+      const result = await publishProject(project, { version });
+      log.info('sharing 24/7', dir, result.url, version ? `(snapshot ${version})` : '');
+      return { url: result.url, mode: 'cloud', version: result.version, files: result.files };
+    }
+
     const port = hosts.portFor(dir);
     if (!port) throw new Error('Host the site first — sharing puts the hosted address online.');
 
-    const project = projects.byPath(dir);
     if (guestReview && !project) {
       throw new Error('Guest review needs a project in the library — this folder is only hosted.');
     }
@@ -1642,11 +1807,30 @@ function registerIpc() {
     shareLinks.set(dir, { version: pinned });
     if (guestReview) guests.enable(dir, { version: pinned });
     const state = shareStateFor(dir);
+    rememberShare(dir, { guestReview, version: pinned });
     log.info('sharing', dir, state.shareUrl, guestReview ? '(guest review)' : '', pinned ? `(pinned ${pinned})` : '');
-    return { url: state.shareUrl, guest: state.guest, version: state.version };
+    return { url: state.shareUrl, mode: 'tunnel', guest: state.guest, version: state.version };
   });
 
-  handle('share:stop', ({ dir }) => {
+  handle('share:stop', async ({ dir, mode = 'tunnel' }) => {
+    // Taking a 24/7 link down deletes the site at the provider: the address
+    // stops answering for everyone, and the project forgets it. The next
+    // 24/7 share mints a new address — same as a fresh tunnel would.
+    if (mode === 'cloud') {
+      const project = projects.byPath(dir);
+      if (!project || !project.deploy) return false;
+      const { provider, siteId, url } = project.deploy;
+      const token = secrets.get(deployTokenKey(provider));
+      if (!token) {
+        throw new Error(`Taking the 24/7 link down needs the ${adapterFor(provider).label} access token — paste it in the Share window first.`);
+      }
+      await runRemove({ provider, siteId, token });
+      projects.update(project.id, { deploy: null });
+      log.info('24/7 link taken down', dir, url);
+      send('ui:refresh');
+      return true;
+    }
+    forgetShare(dir);
     const stopped = stopShare(dir);
     if (stopped) log.info('share stopped', dir);
     return stopped;
@@ -1719,14 +1903,23 @@ function registerIpc() {
       projects.update(id, { deploy: null });
       return { unlinked: true };
     }
-    if (project.attachOnly) throw new Error('A folderless attach project has no files to publish.');
+    return publishProject(project, { provider, version });
+  });
+
+  /** The one publish path — the 24/7 share comes here. Zips the working tree
+   *  (or a snapshot, byte-exact), creates the site on the first run and
+   *  updates it after; the record on the project is what the card and the
+   *  Share window show as the 24/7 link. */
+  async function publishProject(project, { provider = 'netlify', version = null } = {}) {
+    const id = project.id;
+    if (project.attachOnly) throw new Error('A folderless attach project has no files to put online.');
     const runtime = projects.runtimeFor(project);
     if (runtime.kind === 'command') {
-      throw new Error('Publishing uploads static files — build the project and add its build-output folder to the library, then publish that.');
+      throw new Error('A 24/7 link needs static files — build the project, add its build-output folder to the library, and share that.');
     }
     adapterFor(provider); // unknown providers fail before any file work
     const token = secrets.get(deployTokenKey(provider));
-    if (!token) throw new Error('Save an access token first — it goes in the Publish window and is stored in the system keychain.');
+    if (!token) throw new Error('Save an access token first — it goes in the Share window and is stored in the system keychain.');
 
     const progress = msg => send('deploy:progress', { id, msg });
 
@@ -1752,15 +1945,20 @@ function registerIpc() {
 
     try {
       const linked = project.deploy && project.deploy.provider === provider ? project.deploy.siteId : null;
-      const result = await runDeploy({ provider, zipPath: tmpZip, token, siteId: linked, onProgress: progress });
-      projects.update(id, { deploy: { provider, siteId: result.siteId, url: result.url } });
+      const result = await runDeploy({
+        provider, zipPath: tmpZip, token, siteId: linked,
+        name: linked ? null : siteNameFor(project.name), onProgress: progress,
+      });
+      projects.update(id, {
+        deploy: { provider, siteId: result.siteId, url: result.url, at: new Date().toISOString(), version: version || null },
+      });
       log.info('deployed', project.name, provider, result.url);
       send('ui:refresh');
       return { url: result.url, siteId: result.siteId, files: zipped.files, bytes: zipped.bytes, version: version || null };
     } finally {
       fs.promises.rm(tmpZip, { force: true }).catch(() => {});
     }
-  });
+  }
 
   handle('zip:export', async ({ dir }) => {
     assertInRoot(dir, 'The site folder');
@@ -2152,12 +2350,18 @@ function runSelfTest() {
           // The Settings link works even while its modal is hidden — clicking
           // it directly avoids racing openSettings' async fill-in.
           calibration: ['#doctorClose', '#setCalibration'],
+          // Just the first card's ⋯ menu, left open — it must paint above the
+          // cards below it, not disappear behind the next row's thumbnail.
+          menu: ['#doctorClose', '#tab-studio', '.card .menu-btn'],
           // The first card's menu, then its first item — "How to serve this…"
           // on a local project.
           runtime: ['#doctorClose', '#tab-studio', '.card .menu-btn', '.menu-pop button'],
           // Host the first card for real. A project that runs a dev server is
           // only proven by watching its badge stop saying "starting…".
           hosting: ['#doctorClose', '#tab-studio', '.card .host-btn'],
+          // The first card's Share window on its 24/7 side — reached through
+          // the ⋯ menu, so it needs no hosting.
+          share: ['#doctorClose', '#tab-studio', '.card .menu-btn'],
         }[show];
         if (!clicks) throw new Error(`Unknown SLURP_SELFTEST_SHOW: ${show}`);
         await win.webContents.executeJavaScript(`(() => {
@@ -2165,6 +2369,16 @@ function runSelfTest() {
           return true;
         })()`);
         await sleep(700);
+
+        if (show === 'share') {
+          await win.webContents.executeJavaScript(`(() => {
+            const item = [...document.querySelectorAll('.menu-pop button')].find(b => /24\\/7/.test(b.textContent));
+            if (!item) throw new Error('the first card has no 24/7 menu item');
+            item.click();
+            return true;
+          })()`);
+          await sleep(900);
+        }
 
         if (show === 'hosting') {
           const deadline = Date.now() + 150000;
@@ -2249,12 +2463,42 @@ if (!app.requestSingleInstanceLock()) {
           continue;
         }
         const port = await hosts.start(project.path, project.port, {
-          liveReload: !!project.liveReload, runtime, name: project.name,
+          liveReload: !!project.liveReload, runtime, name: project.name, tls: tlsFor(project),
         });
         if (port !== project.port) projects.update(project.id, { port });
         log.info('auto-hosting', project.path, port);
       } catch (err) {
         log.warn('auto-host failed', project.path, err.message);
+      }
+    }
+    send('ui:refresh');
+  }
+
+  /** Bring back every share that was on when the app last ran. The hostname is
+   *  fresh each time (quick tunnels are random by design), so the restored
+   *  link must be re-sent — but the site is public again without being asked,
+   *  and the UI shows it shared. */
+  async function restoreShares() {
+    const saved = loadSavedShares();
+    if (!saved.length) return;
+    for (const entry of saved) {
+      try {
+        const project = projects.byPath(entry.dir);
+        if (!project) { forgetShare(entry.dir); continue; } // the project is gone — so is the intent
+        if (!hosts.portFor(entry.dir)) await ensureHosted(project);
+        let pinned = null;
+        if (entry.version) {
+          try { pinned = versions.getSnapshot(project, String(entry.version)).id; }
+          catch { pinned = null; } // the snapshot is gone — restore unpinned rather than not at all
+        }
+        await tunnels.start(entry.dir, hosts.portFor(entry.dir), {});
+        guests.disable(entry.dir);
+        shareLinks.set(entry.dir, { version: pinned });
+        if (entry.guestReview && projects.byPath(entry.dir)) guests.enable(entry.dir, { version: pinned });
+        const state = shareStateFor(entry.dir);
+        log.info('share restored', entry.dir, state.shareUrl);
+      } catch (err) {
+        log.warn('share restore failed', entry.dir, err.message);
       }
     }
     send('ui:refresh');
@@ -2269,7 +2513,9 @@ if (!app.requestSingleInstanceLock()) {
     controlServer.start().catch(err => log.warn('control api failed to start', err.message));
     // Fill in a browser on first run without blocking the window.
     resolveBrowser().then(found => send('env:changed', { browser: found })).catch(err => log.warn('browser detect', err));
-    autoStartProjects().catch(err => log.warn('auto-host', err));
+    autoStartProjects()
+      .then(() => restoreShares())
+      .catch(err => log.warn('auto-host / share restore', err));
   }).catch(err => onFatal('startup', err));
 
   app.on('before-quit', () => {

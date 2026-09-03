@@ -280,6 +280,7 @@ function applyRememberedOptions(settings) {
   $('#depth').value = String(settings.depth);
   $('#mobile').checked = settings.mobile;
   $('#fixVideos').checked = settings.fixVideos;
+  $('#keepScripts').checked = settings.keepScripts;
   $('#stripBanners').checked = settings.stripBanners;
   $('#showBrowser').checked = !settings.headless;
   $('#waitDelay').value = String(settings.waitDelay || 0);
@@ -304,6 +305,7 @@ function syncOptions() {
   if ($('#captureHeaders').value.trim()) bits.push('extra headers');
   if ($('#scrollPage').checked) bits.push('scrolled first');
   if ($('#fixVideos').checked) bits.push('videos restored');
+  if ($('#keepScripts').checked) bits.push('scripts kept');
   if ($('#stripBanners').checked) bits.push('banners stripped');
   if ($('#showBrowser').checked) bits.push('browser visible');
   const wait = parseInt($('#waitDelay').value, 10) || 0;
@@ -332,6 +334,7 @@ function captureOptionsPayload() {
     depth: parseInt($('#depth').value, 10),
     mobile: $('#mobile').checked,
     fixVideos: $('#fixVideos').checked,
+    keepScripts: $('#keepScripts').checked,
     stripBanners: $('#stripBanners').checked,
     headless: !$('#showBrowser').checked,
     waitDelay: parseInt($('#waitDelay').value, 10) || 0,
@@ -434,6 +437,9 @@ $('#btnCookies').addEventListener('click', async () => {
 
 /* ---------- capture queue ---------- */
 window.snap.on('run:queue', ({ items }) => {
+  // How many captures are still waiting — so run:done knows a batch isn't over
+  // and keeps the panel cancellable for the next item.
+  state.queueLength = items.length;
   const box = $('#runQueue');
   const list = $('#queueList');
   list.innerHTML = '';
@@ -593,14 +599,27 @@ window.snap.on('run:done', async ({ ok, dir, stats, error, canceled, seconds, in
     await refreshLibrary();
     return;
   }
+  // A batch isn't finished until the queue drains. While items remain, keep the
+  // panel live and cancellable for the next one instead of stopping it (which
+  // used to hide Cancel and freeze the timer after the very first item).
+  const more = state.queueLength > 0;
   if (ok) {
     const summary = `${stats.pages} page${stats.pages === 1 ? '' : 's'}, ${stats.images} images, `
       + `${stats.fonts} fonts, ${stats.css} css${seconds ? ` — ${seconds}s` : ''}`;
-    stopRunPanel('done', `Done — ${summary}`);
+    if (more) {
+      $('#runStatus').textContent = `Done — ${summary}. Next in queue…`;
+      $('#btnCancel').disabled = false;
+    } else {
+      stopRunPanel('done', `Done — ${summary}`);
+    }
     toast('Site captured & extracted', {
       kind: 'ok', timeout: 12000,
       action: { label: 'Host now', fn: () => hostSite(dir) },
     });
+  } else if (more) {
+    $('#runStatus').textContent = canceled ? 'Canceled — moving to the next…' : `Failed: ${error} — moving on`;
+    $('#btnCancel').disabled = false;
+    if (!canceled) failed(new Error(error));
   } else {
     stopRunPanel(canceled ? '' : 'fail', canceled ? 'Canceled.' : 'Failed: ' + error);
     if (!canceled) failed(new Error(error));
@@ -639,10 +658,16 @@ async function hostSite(dir, site = null) {
       ? `Connected — fronting your server on localhost:${port}`
       : booting
         ? `Starting ${site.runtime.label} on localhost:${port} — the page turns into the site when it's up`
-        : `Hosting on localhost:${port}`,
+        : `Hosting on localhost:${port} — the SiteSlurp button on the page holds the asset dragger & audit mode`,
     { kind: 'ok', timeout: booting ? 9000 : undefined, action: { label: 'Open', fn: () => invoke('open:url', { url }) } });
     await refreshLibrary();
   } catch (err) {
+    // "Set one in Runtime settings" as a dead-end toast is a scavenger hunt —
+    // take them there.
+    if (site && site.projectId && /Runtime settings/.test(err.message || '')) {
+      toast(err.message, { kind: 'err', timeout: 9000, action: { label: 'Runtime settings', fn: () => openRuntime(site) } });
+      return;
+    }
     failed(err);
   }
 }
@@ -653,15 +678,61 @@ async function stopSite(dir) {
 }
 
 /* ---------- public sharing ---------- */
-// The share modal: one switch for the tunnel itself (free, as shipped), plus
-// the Pro options — guest review (visitors can annotate, and only annotate)
-// and a version pin (reviewers see a snapshot while live keeps moving).
-const shareState = { site: null };
+// The share modal: two ways to be online. A tunnel from this machine (free,
+// as shipped — live, guests can annotate, dies with the app) or the 24/7
+// link — the files pushed to a real host, up with this PC off, until taken
+// down. Plus the Pro options: guest review and a version pin.
+const shareState = { site: null, hasToken: false };
 
-async function openShare(site) {
+const shareMode = () => ($('#shareModeCloud').checked ? 'cloud' : 'tunnel');
+
+/** "12 min ago" for the 24/7 block — how far behind the files the link is. */
+function sinceText(iso) {
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  const m = Math.round(ms / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h} h ago`;
+  return `${Math.round(h / 24)} days ago`;
+}
+
+async function openShare(site, prefer = null) {
   shareState.site = site;
   $('#shareName').textContent = '— ' + site.name;
   $('#shareGuest').checked = !!(site.share && site.share.guest);
+  $('#shareToken').value = '';
+
+  // Which modes this site can use: the tunnel needs the site hosted, the
+  // 24/7 link needs a static project in the library. A mode this site can't
+  // use stays visible with its reason, so the fix is obvious.
+  const command = site.runtime && site.runtime.kind === 'command';
+  const sharing = !!(site.share && site.share.status === 'up');
+  const cloudUp = !!(site.deploy && site.deploy.url);
+  const tunnelWhy = site.port ? '' : 'Host the site first — the tunnel puts the hosted address online.';
+  const cloudWhy = !site.projectId ? 'Needs a project in the library — this folder is only hosted.'
+    : site.attachOnly ? 'A folderless attach project has no files to put online.'
+      : command ? 'Needs static files — a dev-server project shares its build output, not its source. Add the build folder to the library and share that.'
+        : '';
+  $('#shareModeTunnel').disabled = !!tunnelWhy;
+  $('#shareModeCloud').disabled = !!cloudWhy;
+  $('#shareTunnelWhy').textContent = tunnelWhy;
+  $('#shareTunnelWhy').classList.toggle('hidden', !tunnelWhy);
+  $('#shareCloudWhy').textContent = cloudWhy;
+  $('#shareCloudWhy').classList.toggle('hidden', !cloudWhy);
+  // Open on what was asked for, else on what's already up, else on the first
+  // mode this site can use.
+  let mode = prefer || (cloudUp && !sharing ? 'cloud' : 'tunnel');
+  if (mode === 'cloud' && cloudWhy) mode = 'tunnel';
+  if (mode === 'tunnel' && tunnelWhy && !cloudWhy) mode = 'cloud';
+  $(mode === 'cloud' ? '#shareModeCloud' : '#shareModeTunnel').checked = true;
+
+  try {
+    const { has } = await invoke('deploy:token', { provider: 'netlify' });
+    shareState.hasToken = !!has;
+  } catch { shareState.hasToken = false; }
+  $('#shareTokenState').textContent = shareState.hasToken ? '(saved — paste to replace)' : '';
 
   // A version pin only makes sense for a static project with snapshots.
   const row = $('#shareVersionRow');
@@ -669,9 +740,7 @@ async function openShare(site) {
   pick.innerHTML = '';
   const live = document.createElement('option');
   live.value = '';
-  live.textContent = 'Live — changes as you edit';
   pick.appendChild(live);
-  const command = site.runtime && site.runtime.kind === 'command';
   let hasVersions = false;
   if (site.projectId && !command && !site.attachOnly) {
     try {
@@ -686,43 +755,116 @@ async function openShare(site) {
     } catch { /* no snapshots is fine */ }
   }
   row.classList.toggle('hidden', command || !hasVersions);
-  if (site.share && site.share.version) pick.value = site.share.version;
+  const pinned = mode === 'cloud' ? (site.deploy && site.deploy.version) : (site.share && site.share.version);
+  if (pinned) pick.value = pinned;
 
-  const sharing = site.share && site.share.status === 'up';
   $('#shareCurrent').classList.toggle('hidden', !sharing);
   $('#shareStopBtn').classList.toggle('hidden', !sharing);
   if (sharing) $('#shareLinkText').value = site.share.shareUrl || site.share.url;
-  $('#shareGo').textContent = sharing ? 'Update link' : 'Share';
+  $('#shareCloudCurrent').classList.toggle('hidden', !cloudUp);
+  $('#shareCloudStopBtn').classList.toggle('hidden', !cloudUp);
+  if (cloudUp) {
+    $('#shareCloudLinkText').value = site.deploy.url;
+    const since = site.deploy.at ? sinceText(site.deploy.at) : '';
+    $('#shareCloudLabel').textContent = 'Up 24/7' + (since ? ` — files pushed ${since}` : '')
+      + (site.deploy.version ? ` from snapshot ${site.deploy.version}` : '') + ':';
+  }
+  syncShareMode();
   $('#shareModal').classList.remove('hidden');
 }
+
+/** The window follows the chosen mode: guest review belongs to the tunnel,
+ *  the token to the 24/7 link, and the button says what will happen. */
+function syncShareMode() {
+  const site = shareState.site;
+  const cloud = shareMode() === 'cloud';
+  $('#shareTunnelOpts').classList.toggle('hidden', cloud);
+  $('#shareCloudOpts').classList.toggle('hidden', !cloud);
+  $('#shareVersionHint').textContent = cloud
+    ? 'Put a snapshot online instead of the files as they are now — byte-for-byte, so the link is reproducible.'
+    : 'Pin the link to a snapshot and reviewers see that exact state while you keep editing live. Pinned guests can annotate until a newer snapshot exists.';
+  const first = $('#shareVersion').options[0];
+  if (first) first.textContent = cloud ? 'The files as they are right now' : 'Live — changes as you edit';
+  const sharing = !!(site && site.share && site.share.status === 'up');
+  const cloudUp = !!(site && site.deploy && site.deploy.url);
+  $('#shareGo').textContent = cloud ? (cloudUp ? 'Push an update' : 'Put it up 24/7') : (sharing ? 'Update link' : 'Share');
+  $('#shareGo').disabled = cloud ? $('#shareModeCloud').disabled : $('#shareModeTunnel').disabled;
+}
+$('#shareModeTunnel').addEventListener('change', syncShareMode);
+$('#shareModeCloud').addEventListener('change', syncShareMode);
 
 $('#shareCancel').addEventListener('click', () => $('#shareModal').classList.add('hidden'));
 $('#shareCopy').addEventListener('click', async () => {
   await navigator.clipboard.writeText($('#shareLinkText').value);
   toast('Share link copied', { kind: 'ok', timeout: 2500 });
 });
+$('#shareCloudCopy').addEventListener('click', async () => {
+  await navigator.clipboard.writeText($('#shareCloudLinkText').value);
+  toast('24/7 link copied', { kind: 'ok', timeout: 2500 });
+});
+$('#shareCloudOpen').addEventListener('click', () =>
+  invoke('open:url', { url: $('#shareCloudLinkText').value }).catch(failed));
 $('#shareStopBtn').addEventListener('click', async () => {
   const site = shareState.site;
   $('#shareModal').classList.add('hidden');
   if (site) await unshareSite(site);
 });
+// Taking the 24/7 link down deletes the site at the host — for everyone, for
+// good — so it asks once. Sharing 24/7 again makes a new address.
+$('#shareCloudStopBtn').addEventListener('click', async () => {
+  const site = shareState.site;
+  if (!site || !site.deploy) return;
+  const yes = await invoke('shell:confirm', {
+    title: 'Take the 24/7 link down',
+    message: `Take ${site.deploy.url.replace(/^https?:\/\//, '')} offline?`,
+    detail: 'The address stops answering and the site leaves your Netlify account. Sharing 24/7 again makes a new address.',
+    confirmLabel: 'Take it down',
+  }).catch(() => false);
+  if (!yes) return;
+  $('#shareModal').classList.add('hidden');
+  try {
+    await invoke('share:stop', { dir: site.dir, mode: 'cloud' });
+    toast('24/7 link taken down', { kind: 'ok', timeout: 3000 });
+  } catch (err) { failed(err); }
+  await refreshLibrary();
+});
 $('#shareGo').addEventListener('click', async () => {
   const site = shareState.site;
   if (!site) return;
   const button = $('#shareGo');
+  const cloud = shareMode() === 'cloud';
+  const version = $('#shareVersion').value || null;
+  const guestReview = !cloud && $('#shareGuest').checked;
   button.disabled = true;
+  if (cloud) {
+    // The token saves first, so a mistyped one fails here — not mid-upload.
+    try {
+      const token = $('#shareToken').value.trim();
+      if (token) {
+        await invoke('deploy:setToken', { provider: 'netlify', token });
+        $('#shareToken').value = '';
+        shareState.hasToken = true;
+        $('#shareTokenState').textContent = '(saved — paste to replace)';
+      }
+      if (!shareState.hasToken) throw new Error('Paste a Netlify access token first — a free account at netlify.com takes a minute.');
+    } catch (err) {
+      button.disabled = false;
+      failed(err);
+      return;
+    }
+  }
   $('#shareModal').classList.add('hidden');
-  const pending = toast(`Creating a public link for "${site.name}"…`, { timeout: 0 });
+  const pending = toast(cloud ? `Putting "${site.name}" online 24/7…` : `Creating a public link for "${site.name}"…`, { timeout: 0 });
   state.shareToast = pending.querySelector('span');
   try {
-    const guestReview = $('#shareGuest').checked;
-    const version = $('#shareVersion').value || null;
-    const { url } = await invoke('share:start', { dir: site.dir, guestReview, version });
+    const { url } = await invoke('share:start', { dir: site.dir, mode: cloud ? 'cloud' : 'tunnel', guestReview, version });
     pending.remove();
-    toast(`${site.name} is public at ${url.replace('https://', '').split('/?')[0]}`
-      + (guestReview ? ' — guests can annotate' : '')
-      + (version ? ' · pinned to a snapshot' : '')
-      + ' — the link works until sharing or hosting stops', {
+    const host = url.replace('https://', '').split('/?')[0];
+    toast(cloud
+      ? `${site.name} is up 24/7 at ${host}` + (version ? ' · from a snapshot' : '')
+        + ' — it stays online with this PC off, until you take it down'
+      : `${site.name} is public at ${host}` + (guestReview ? ' — guests can annotate' : '')
+        + (version ? ' · pinned to a snapshot' : '') + ' — the link works until sharing or hosting stops', {
       kind: 'ok', timeout: 15000,
       action: { label: 'Copy link', fn: () => navigator.clipboard.writeText(url) },
     });
@@ -742,89 +884,9 @@ async function unshareSite(site) {
   await refreshLibrary();
 }
 
-/* ---------- publish (deploy) ---------- */
-// "Publish…" pushes the files to a real host — Netlify's ZIP API first. The
-// token lives in the system keychain; the renderer only ever learns "saved".
-const pubState = { site: null };
-
-async function openPublish(site) {
-  pubState.site = site;
-  $('#pubName').textContent = '— ' + site.name;
-  $('#pubToken').value = '';
-  $('#pubStatus').classList.add('hidden');
-  $('#pubStatus').textContent = '';
-
-  try {
-    const { has } = await invoke('deploy:token', { provider: 'netlify' });
-    $('#pubTokenState').textContent = has ? '(saved — paste to replace)' : '';
-  } catch { $('#pubTokenState').textContent = ''; }
-
-  const pick = $('#pubVersion');
-  pick.innerHTML = '';
-  const working = document.createElement('option');
-  working.value = '';
-  working.textContent = 'The files as they are right now';
-  pick.appendChild(working);
-  try {
-    const { snapshots } = await invoke('version:list', { id: site.projectId });
-    for (const snap of snapshots) {
-      const option = document.createElement('option');
-      option.value = snap.id;
-      option.textContent = `Snapshot · ${snap.label || snap.source} · ${snap.id}`;
-      pick.appendChild(option);
-    }
-  } catch { /* snapshots unavailable — working tree still publishes */ }
-
-  const linked = site.deploy && site.deploy.url;
-  $('#pubLinked').classList.toggle('hidden', !linked);
-  if (linked) $('#pubLinkedText').textContent = `Publishing updates ${site.deploy.url}`;
-
-  $('#publishModal').classList.remove('hidden');
-}
-
-$('#pubCancel').addEventListener('click', () => $('#publishModal').classList.add('hidden'));
-$('#pubUnlink').addEventListener('click', async () => {
-  const site = pubState.site;
-  if (!site) return;
-  await invoke('deploy:run', { id: site.projectId, unlink: true }).catch(failed);
-  $('#pubLinked').classList.add('hidden');
-  toast('Unlinked — the next publish creates a fresh site', { kind: 'ok', timeout: 4000 });
-  await refreshLibrary();
-});
+// Publish progress ("Uploading the site…") lands in the pending share toast.
 window.snap.on('deploy:progress', ({ msg }) => {
-  const status = $('#pubStatus');
-  status.classList.remove('hidden');
-  status.textContent = msg;
-});
-$('#pubGo').addEventListener('click', async () => {
-  const site = pubState.site;
-  if (!site) return;
-  const button = $('#pubGo');
-  button.disabled = true;
-  try {
-    const token = $('#pubToken').value.trim();
-    if (token) {
-      await invoke('deploy:setToken', { provider: 'netlify', token });
-      $('#pubToken').value = '';
-      $('#pubTokenState').textContent = '(saved — paste to replace)';
-    }
-    const version = $('#pubVersion').value || null;
-    const status = $('#pubStatus');
-    status.classList.remove('hidden');
-    status.textContent = 'Starting…';
-    const result = await invoke('deploy:run', { id: site.projectId, provider: 'netlify', version });
-    $('#publishModal').classList.add('hidden');
-    toast(`Published — ${result.url.replace('https://', '')} (${result.files} files)`, {
-      kind: 'ok', timeout: 15000,
-      action: { label: 'Open', fn: () => invoke('open:url', { url: result.url }).catch(failed) },
-    });
-    await refreshLibrary();
-  } catch (err) {
-    $('#pubStatus').classList.add('hidden');
-    failed(err);
-  } finally {
-    button.disabled = false;
-  }
+  if (state.shareToast) state.shareToast.textContent = msg;
 });
 
 /* ---------- local https ---------- */
@@ -994,8 +1056,13 @@ function textButton(icon, label, fn) {
 /* One "⋯" button per card; secondary actions live in a popover so the card
    never overflows (which used to clip the last buttons off the edge). */
 let openMenu = null;
+// A background ui:refresh (a thumbnail finishing, a snapshot restoring) must not
+// yank an open ⋯ menu closed under the user's cursor. renderLibrary defers while
+// a menu is open; closing it flushes whatever refresh was held back.
+let pendingRender = false;
 function closeMenu() {
   if (openMenu) { openMenu.remove(); openMenu = null; }
+  if (pendingRender) { pendingRender = false; renderLibrary(); }
 }
 document.addEventListener('click', e => {
   if (openMenu && !openMenu.contains(e.target) && e.target.closest('.menu-btn') !== openMenu.anchor) closeMenu();
@@ -1055,6 +1122,7 @@ function renderCard(site) {
   const badge = document.createElement('span');
   const running = runState(site);
   const shared = site.share && site.share.status === 'up' && site.port ? site.share : null;
+  const always = site.deploy && site.deploy.url ? site.deploy : null;
   if (site.port) {
     badge.className = 'badge live';
     badge.textContent = 'localhost:' + site.port;
@@ -1085,6 +1153,19 @@ function renderCard(site) {
       invoke('open:url', { url: shared.url }).catch(failed);
     });
     thumb.appendChild(pub);
+  }
+  // Up on a real host: this chip stays whether or not the site is hosted or
+  // the app is even open — that's the point of it.
+  if (always) {
+    const up = document.createElement('span');
+    up.className = 'badge public always' + (shared ? ' second' : '');
+    up.textContent = '24/7';
+    up.title = always.url + ' — up around the clock, with this PC off too. Click to open.';
+    up.addEventListener('click', e => {
+      e.stopPropagation();
+      invoke('open:url', { url: always.url }).catch(failed);
+    });
+    thumb.appendChild(up);
   }
   if (!site.missing && (site.kind === 'extracted' || site.kind === 'local' || site.port)) {
     thumb.classList.add('clickable');
@@ -1171,9 +1252,8 @@ function renderCard(site) {
       } });
     }
   }
-  if (site.projectId && !site.missing) {
-    more.push({ icon: 'monitor', label: 'Open in Studio Browser', fn: () => openStudioBrowser(site) });
-  }
+  // Studio Browser already has its own icon button in the card's action row —
+  // no ⋯ duplicate.
   if (shared) {
     more.push({ icon: 'share', label: 'Copy public link', fn: async () => {
       await navigator.clipboard.writeText(shared.shareUrl || shared.url);
@@ -1190,11 +1270,17 @@ function renderCard(site) {
         invoke('open:url', { url: site.httpsUrl }).catch(failed) });
     }
   }
-  // Push the files to a real host. Static file sets only — a dev-server
-  // project publishes its build output, not its source.
+  // The 24/7 link: the files on a real host, up with this PC off. Static file
+  // sets only — a dev-server project shares its build output, not its source.
   if (site.projectId && !site.missing && !site.attachOnly && !command) {
-    more.push({ icon: 'share', label: site.deploy ? 'Publish update to the web…' : 'Publish to the web…',
-      fn: () => openPublish(site) });
+    more.push({ icon: 'share', label: site.deploy ? 'Push an update to the 24/7 link…' : 'Share 24/7 — up with this PC off…',
+      fn: () => openShare(site, 'cloud') });
+  }
+  if (site.deploy && site.deploy.url) {
+    more.push({ icon: 'share', label: 'Copy 24/7 link', fn: async () => {
+      await navigator.clipboard.writeText(site.deploy.url);
+      toast('24/7 link copied', { kind: 'ok', timeout: 2500 });
+    } });
   }
   if (site.port && site.hasSitemap) {
     more.push({ icon: 'map', label: 'Open sitemap', fn: () =>
@@ -1227,10 +1313,18 @@ function renderCard(site) {
     more.push({ icon: 'home', label: 'Set entry page…', fn: () => openEntry(site) });
   }
   if (site.projectId) {
+    // Audit mode's home is the SiteSlurp menu on the hosted page itself; these
+    // stay as the app-side mirror of that toggle.
     if (site.reviewActive) {
-      more.push({ icon: 'stop', label: 'End review mode', fn: async () => {
+      more.push({ icon: 'stop', label: 'End audit mode', fn: async () => {
         await invoke('review:stop', { dir: site.dir });
-        toast('Review mode off — the overlay is gone on next reload', { kind: 'ok', timeout: 4000 });
+        toast('Audit mode off — the overlay is gone on next reload', { kind: 'ok', timeout: 4000 });
+        await refreshLibrary();
+      } });
+    } else if (!site.missing) {
+      more.push({ icon: 'note', label: 'Start audit mode', fn: async () => {
+        await invoke('review:start', { dir: site.dir });
+        toast('Audit mode on — annotate in the browser, then Export from the toolbar', { kind: 'ok', timeout: 7000 });
         await refreshLibrary();
       } });
     }
@@ -1282,23 +1376,26 @@ function renderCard(site) {
     actions.appendChild(textButton('stop', 'Stop', () => stopSite(site.dir)));
     actions.appendChild(iconBtn('open', 'Open in browser', () =>
       invoke('open:url', { url: `http://localhost:${site.port}/` })));
-    const shareBtn = iconBtn('share', shared
+    const up247 = !!(site.deploy && site.deploy.url);
+    const shareBtn = iconBtn('share', shared || up247
       ? 'Sharing is on — open the link options or stop sharing'
-      : 'Share publicly — an https link anyone can open, with optional guest annotation', () =>
+      : 'Share publicly — a tunnel while this PC is on, or a 24/7 link that stays up with it off', () =>
       openShare(site));
-    if (shared) shareBtn.classList.add('sharing');
+    if (shared || up247) shareBtn.classList.add('sharing');
     actions.appendChild(shareBtn);
   } else if (!site.missing) {
     actions.appendChild(textButton('globe', 'Host', () => hostSite(site.dir, site)));
+    // A 24/7 link needs no hosting: a card that is up around the clock keeps
+    // its share button so the link and the take-down stay one click away.
+    if (site.deploy && site.deploy.url) {
+      const shareBtn = iconBtn('share', 'Up 24/7 — open the link options or take it down', () => openShare(site));
+      shareBtn.classList.add('sharing');
+      actions.appendChild(shareBtn);
+    }
   }
   if (site.projectId && !site.missing) {
     actions.appendChild(iconBtn('monitor', 'Open in Studio Browser — annotate with a console, viewports and versions', () =>
       openStudioBrowser(site)));
-    actions.appendChild(iconBtn('note', 'Review this site (annotate + export a spec)', async () => {
-      await invoke('review:start', { dir: site.dir });
-      toast('Review mode on — annotate in the browser, then Export from the toolbar', { kind: 'ok', timeout: 7000 });
-      await refreshLibrary();
-    }));
   }
   if (site.kind === 'extracted') {
     actions.appendChild(iconBtn('palette', 'Recolor palette', () => openPalette(site)));
@@ -1387,7 +1484,8 @@ function renderRecent() {
 }
 
 function renderLibrary() {
-  closeMenu(); // the popover's card is about to be re-rendered
+  // Don't re-render out from under an open menu — hold it until the menu closes.
+  if (openMenu) { pendingRender = true; return; }
   const sites = visibleSites();
   const grid = $('#grid');
   grid.innerHTML = '';
@@ -1491,7 +1589,7 @@ async function renderReviewHistory(site) {
   const list = $('#historyList');
   list.innerHTML = '';
   if (!reviews.length) {
-    list.innerHTML = '<div class="history-empty">No reviews yet — click the speech-bubble button on the card to start one.</div>';
+    list.innerHTML = '<div class="history-empty">No audits yet — host the site and flip on Audit mode from the SiteSlurp menu on the page.</div>';
   }
   for (const review of reviews) {
     const row = document.createElement('div');
@@ -1528,6 +1626,21 @@ async function renderReviewHistory(site) {
   }
 }
 $('#historyClose').addEventListener('click', () => $('#historyModal').classList.add('hidden'));
+// The offline half of guest review: read a guest's downloaded audit file into
+// the open review. Duplicates (notes that already arrived live) are skipped.
+$('#histImport').addEventListener('click', async () => {
+  const site = hist.site;
+  if (!site || !site.projectId) return;
+  try {
+    const result = await invoke('review:import', { id: site.projectId });
+    if (!result) return; // picker cancelled
+    toast(result.imported
+      ? `Audit imported — ${result.imported} note${result.imported === 1 ? '' : 's'}`
+        + (result.skipped ? `, ${result.skipped} already here or unreadable` : '')
+      : 'Nothing new in that file — every note was already here.', { kind: 'ok', timeout: 6000 });
+    await renderReviewHistory(site);
+  } catch (err) { failed(err); }
+});
 $('#histTabReviews').addEventListener('click', () => histSetTab('reviews'));
 $('#histTabVersions').addEventListener('click', async () => {
   histSetTab('versions');
@@ -1659,10 +1772,24 @@ async function openDiff(site, snap) {
   await renderDiffFiles();
 }
 
+// Always diff and label older → newer, whichever of the two the user picked as
+// the comparison target. Otherwise choosing an older snapshot inverts Before/
+// After and makes the adds/removes read backwards. 'working' is always "now".
+function diffOrder() {
+  const a = hist.diff.a;
+  const b = $('#diffAgainst').value;
+  if (b === 'working') return { older: a, newer: b };
+  const timeOf = id => {
+    const s = hist.snapshots.find(x => x.id === id);
+    return s ? Date.parse(s.timestamp) || 0 : 0;
+  };
+  return timeOf(b) < timeOf(a) ? { older: b, newer: a } : { older: a, newer: b };
+}
+
 async function renderDiffFiles() {
   if (!hist.diff) return;
-  const { site, a } = hist.diff;
-  const b = $('#diffAgainst').value;
+  const { site } = hist.diff;
+  const { older: a, newer: b } = diffOrder();
   $('#diffView').classList.add('hidden');
   const box = $('#diffFiles');
   box.innerHTML = '<div class="history-empty">Comparing…</div>';
@@ -1703,8 +1830,8 @@ async function renderDiffFiles() {
 }
 
 async function showFileDiff(relPath) {
-  const { site, a } = hist.diff;
-  const b = $('#diffAgainst').value;
+  const { site } = hist.diff;
+  const { older: a, newer: b } = diffOrder();
   const view = $('#diffView');
   view.classList.remove('hidden');
   view.innerHTML = '<div class="history-empty">Loading…</div>';
@@ -2048,7 +2175,10 @@ function rtRenderState(runtimeState) {
   if (!runtimeState || runtimeState.kind !== 'command') {
     box.classList.add('hidden');
     $('#rtRestart').classList.add('hidden');
-    if (!rt.capturing) logEl.classList.add('hidden');
+    // A just-finished install leaves its output here; the project isn't hosted,
+    // so state is null on the next poll. Keep anything already printed — only
+    // an empty log box is worth hiding.
+    if (!rt.capturing && !logEl.textContent.trim()) logEl.classList.add('hidden');
     return;
   }
   box.classList.remove('hidden');
@@ -2394,8 +2524,8 @@ function allCommands() {
           label: `Serve ${site.name} over HTTPS: ${site.https ? 'on' : 'off'}`,
           fn: () => toggleHttps(site) });
         if (!(site.runtime && site.runtime.kind === 'command')) {
-          list.push({ group: 'sites', icon: 'share', label: `Publish ${site.name} to the web…`,
-            fn: () => openPublish(site) });
+          list.push({ group: 'sites', icon: 'share', label: `Share ${site.name} 24/7 — up with this PC off…`,
+            fn: () => openShare(site, 'cloud') });
         }
       }
       if (site.kind === 'extracted' && site.sourceUrl && !site.missing) {
@@ -2506,14 +2636,18 @@ window.snap.on('update:ready', ({ version }) => {
   });
 });
 
+// Every dismissable modal, in one place so Escape and backdrop-click can never
+// drift apart (they used to — Share/Publish/Runtime were missing from one list
+// or the other, leaving them closeable only by their Cancel button).
+const MODAL_IDS = ['cmdModal', 'settingsModal', 'doctorModal', 'aboutModal', 'historyModal', 'runtimeModal',
+  'calibrationModal', 'logModal', 'entryModal', 'snapModal', 'attachModal', 'batchModal',
+  'shareModal'];
+
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeMenu();
-    for (const sel of ['#cmdModal', '#settingsModal', '#doctorModal', '#aboutModal', '#paletteDrawer',
-      '#historyModal', '#calibrationModal', '#logModal', '#entryModal', '#snapModal', '#attachModal',
-      '#batchModal']) {
-      $(sel).classList.add('hidden');
-    }
+    $('#paletteDrawer').classList.add('hidden');
+    for (const id of MODAL_IDS) $('#' + id).classList.add('hidden');
     clearInterval(logTimer);
   }
   // Ctrl+K also arrives from the main process, but binding it here keeps the
@@ -2535,9 +2669,8 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// Click the backdrop to dismiss a modal.
-for (const id of ['cmdModal', 'settingsModal', 'doctorModal', 'aboutModal', 'historyModal', 'runtimeModal',
-  'calibrationModal', 'logModal', 'entryModal', 'snapModal', 'attachModal', 'batchModal']) {
+// Click the backdrop to dismiss a modal — same canonical list as Escape.
+for (const id of MODAL_IDS) {
   document.getElementById(id).addEventListener('click', e => {
     if (e.target.id === id) e.target.classList.add('hidden');
   });

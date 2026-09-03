@@ -142,6 +142,7 @@
   /* ---------- shadow UI ---------- */
   const host = document.createElement('div');
   host.id = '__ss-review-host';
+  host.setAttribute('data-slurp-ui', '');
   const root = host.attachShadow({ mode: 'open' });
   // Same scheme as the Studio window: near-black surfaces, gray type, white for
   // the live thing. Shadow DOM keeps all of it off the page being reviewed.
@@ -392,7 +393,7 @@
     if (context.selector) panel.appendChild(el('div', 'sel-label', context.selector));
 
     // rating 1–10, one tap
-    panel.appendChild(el('div', 'lbl', 'Rating (optional — needs a reason)'));
+    panel.appendChild(el('div', 'lbl', 'Rating (optional)'));
     const rateRow = el('div', 'row');
     for (let i = 1; i <= 10; i++) {
       const b = el('button', 'rate' + (state.draft.input.rating === i ? ' on' : ''), String(i));
@@ -512,23 +513,22 @@
     panel.appendChild(actions);
 
     function refreshSave() {
-      const d = state.draft.input;
-      // A pinned snapshot view is read-only for the reviewer (notes describe
-      // the live version). A pinned *guest* may annotate as long as the pin
-      // is still the newest snapshot — the server checks again at save time.
+      // A rating saves on its own now (no minimum reason length) — the only
+      // thing that blocks Save is a read-only snapshot view: pinned for the
+      // reviewer (notes describe live), stale-pinned for a guest. The server
+      // checks a guest's pin again at save time.
       const pinnedView = isGuest()
         ? !!(state.config && state.config.pinnedStale)
         : !!(state.config && state.config.pinned);
-      const blocked = d.rating !== null && d.why.trim().length < (state.config ? state.config.minWhy : 10);
-      save.disabled = blocked || pinnedView;
+      save.disabled = pinnedView;
       save.title = pinnedView ? (isGuest() ? 'This page has moved on since this link was made.'
         : 'Annotations target the live version — use "Back to live" first.') : '';
-      err.style.display = (blocked || pinnedView) ? 'block' : 'none';
+      err.style.display = pinnedView ? 'block' : 'none';
       err.textContent = pinnedView
         ? (isGuest()
           ? 'This page has moved on — the site changed since this snapshot link was made.'
           : 'Viewing a snapshot — annotations target the live version.')
-        : blocked ? 'A rating needs a reason — a number alone isn\'t actionable.' : '';
+        : '';
     }
     refreshSave();
 
@@ -949,6 +949,30 @@
     return `${mine} note${mine === 1 ? '' : 's'}`;
   };
 
+  /** [guest] The audit as a file: every note in the open review, in the same
+   *  stripped shape the guest API serves, wrapped with enough header for the
+   *  owner's "Import audit…" to validate and de-duplicate it. The live POST is
+   *  still the primary path — this survives the share link dying first. */
+  function downloadAuditFile() {
+    const cfg = state.config || {};
+    const annotations = (cfg.annotations || []).filter(a => !a.auto);
+    if (!annotations.length) { toast('Nothing to send yet — save a note first.'); return; }
+    const payload = {
+      siteslurpAudit: 1,
+      project: cfg.project ? cfg.project.name : '',
+      author: state.guestName || 'Guest',
+      exportedAt: new Date().toISOString(),
+      annotations,
+    };
+    const blob = new window.Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `audit-${(payload.project || 'site').replace(/[^\w-]+/g, '-').toLowerCase()}-${payload.exportedAt.slice(0, 10)}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    toast(`Audit file downloaded — ${annotations.length} note${annotations.length === 1 ? '' : 's'}. Send it to the site owner; they import it from Project history.`);
+  }
+
   function setAnnotating(on) {
     state.annotating = !!on;
     if (bar.isConnected) buildBar();
@@ -975,13 +999,19 @@
     siteNote.addEventListener('click', () => openPanel('global', captureContext([], null)));
     bar.appendChild(siteNote);
 
-    // Guest toolbar stops here (plus the count and the cheatsheet): the rest
-    // of the toolbelt belongs to the person at the keyboard.
+    // Guest toolbar stops here (plus the count, the audit download and the
+    // cheatsheet): the rest of the toolbelt belongs to the person at the keyboard.
     if (isGuest()) {
       bar.appendChild(el('span', 'sep'));
       const count = el('span', 'count', countLabel());
       count.id = 'ss-count';
       bar.appendChild(count);
+      // Notes already reached the owner live as they were saved; the file is
+      // the backup path — it survives the link going down before they looked.
+      const sendBtn = el('button', '', 'Send audit');
+      sendBtn.title = 'Download this audit as a file you can send — the owner imports it from Project history';
+      sendBtn.addEventListener('click', downloadAuditFile);
+      bar.appendChild(sendBtn);
       const cheat = el('button', '', '?');
       cheat.title = 'Keyboard shortcuts';
       cheat.addEventListener('click', toggleCheatsheet);
@@ -1207,7 +1237,10 @@
     state.hoverEl = null;
   }
 
-  const ownNode = target => target === host || host.contains(target);
+  // SiteSlurp's other in-page surfaces (the menu button, the grab overlay)
+  // mark their hosts with data-slurp-ui — they are chrome, not the page.
+  const ownNode = target => target === host || host.contains(target)
+    || !!(target && target.closest && target.closest('[data-slurp-ui]'));
 
   document.addEventListener('mousemove', event => {
     if (!state.annotating || state.dragStart || panel) return;
@@ -1393,7 +1426,13 @@
     const go = el('button', 'save', 'Start reviewing');
     const done = () => {
       state.guestName = input.value.trim().slice(0, 60);
-      try { localStorage.setItem('__ss_guest_name', state.guestName); } catch { /* storage may be off */ }
+      try {
+        localStorage.setItem('__ss_guest_name', state.guestName);
+        // A separate "was asked" flag: an empty name is a real answer (the
+        // server defaults the author to "Guest"), so we must not re-prompt on
+        // every page just because the field was left blank.
+        localStorage.setItem('__ss_guest_named', '1');
+      } catch { /* storage may be off */ }
       modal.remove();
       showGuestBanner();
     };
@@ -1424,8 +1463,12 @@
     root.appendChild(bar);
     document.documentElement.appendChild(host);
     if (isGuest()) {
-      try { state.guestName = localStorage.getItem('__ss_guest_name') || ''; } catch { /* storage may be off */ }
-      if (state.guestName) showGuestBanner();
+      let asked = false;
+      try {
+        state.guestName = localStorage.getItem('__ss_guest_name') || '';
+        asked = localStorage.getItem('__ss_guest_named') === '1';
+      } catch { /* storage may be off */ }
+      if (asked) showGuestBanner();
       else promptGuestName();
     }
     if (state.config.pick) enterPickMode();

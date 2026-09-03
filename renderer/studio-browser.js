@@ -138,7 +138,9 @@ async function fillVersions() {
       : when.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }))) + ` · ${snap.source}`;
     pick.appendChild(opt);
   }
-  pick.classList.remove('hidden');
+  // A picker whose only entry is "Live" pins nothing — show it only once there
+  // is a snapshot to switch to.
+  pick.classList.toggle('hidden', !result.snapshots.length);
 }
 $('#sbVersion').addEventListener('change', e => {
   invoke('sb:pin', { versionId: e.target.value }).catch(failed);

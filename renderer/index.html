@@ -51,15 +51,7 @@
      buttons into the slot reserved on the right. -->
 <header class="topbar" id="topbar">
   <div class="brand">
-    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
-      <defs><mask id="markCut">
-        <rect width="32" height="32" rx="9" fill="#fff"/>
-        <path d="M16 6.4v8.8" stroke="#000" stroke-width="3.1" stroke-linecap="round"/>
-        <path d="M10.9 13.1 16 19.2l5.1-6.1" fill="none" stroke="#000" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M6.7 24.3c1.85-2.1 3.75-2.1 5.6 0s3.75 2.1 5.6 0 3.75-2.1 5.6 0" fill="none" stroke="#000" stroke-width="2.7" stroke-linecap="round"/>
-      </mask></defs>
-      <rect width="32" height="32" rx="9" fill="currentColor" mask="url(#markCut)"/>
-    </svg>
+    <img class="mark" src="slurp-logo.png" alt="" aria-hidden="true">
     <h1>SiteSlurp</h1>
   </div>
 
@@ -139,6 +131,13 @@
           <label class="opt-main"><input type="checkbox" id="fixVideos"> Restore videos</label>
           <p class="opt-help">The capture engine drops video files to keep snapshots small. This puts
             the original video URLs back so the pages still play.</p>
+        </div>
+
+        <div class="opt-row">
+          <label class="opt-main"><input type="checkbox" id="keepScripts"> Keep JavaScript (3D &amp; WebGL sites)</label>
+          <p class="opt-help">Normally scripts are removed, leaving a frozen snapshot. Keep them when a
+            site draws itself with code &mdash; three.js heroes, WebGL, canvas animations &mdash; so the
+            captured page still runs. Some kept scripts may still call out to the original site.</p>
         </div>
 
         <div class="opt-row">
@@ -416,6 +415,7 @@
       </div>
     </div>
     <div class="modal-actions">
+      <button id="histImport" class="small" title="Read a guest's downloaded audit file into this project's open review">Import audit…</button>
       <button id="historyClose" class="primary small">Close</button>
     </div>
   </div>
@@ -552,72 +552,64 @@
   </div>
 </div>
 
-<!-- Share modal [PRO options on a LITE base]: the public link plus guest
-     review and a version pin. Basic one-click sharing stays free. -->
+<!-- Share modal [PRO options on a LITE base]: two ways to be online — a
+     tunnel from this machine (free, as shipped) or the 24/7 link, the files
+     pushed to a real host so the address stays up with this PC off. Plus the
+     Pro options: guest review and a version pin. -->
 <div id="shareModal" class="modal hidden">
   <div class="modal-card">
     <h3>Share <span id="shareName" class="mini"></span></h3>
-    <p class="modal-hint">Puts the hosted site online at a random https address through a secure
-      tunnel. The link works until sharing or hosting stops — nothing outlives the session.</p>
-    <label class="opt inline"><input type="checkbox" id="shareGuest"> Let visitors annotate (guest review)</label>
-    <span class="mini modal-hint">Guests leave notes on the page, signed with their name. Exports, resolving and
-      your files stay locked to this machine.</span>
-    <label id="shareVersionRow">Version reviewers see
+    <div class="share-modes" role="radiogroup" aria-label="How long the link stays up">
+      <label class="share-mode"><input type="radio" name="shareMode" id="shareModeTunnel" value="tunnel" checked>
+        <span class="share-mode-title">While this PC is on</span>
+        <span class="mini">A secure tunnel from this machine at a random https address. Live as you edit,
+          and guests can annotate. Goes down when the app closes or the PC sleeps.</span>
+        <span class="mini share-mode-why hidden" id="shareTunnelWhy"></span>
+      </label>
+      <label class="share-mode"><input type="radio" name="shareMode" id="shareModeCloud" value="cloud">
+        <span class="share-mode-title">24/7, even with this PC off</span>
+        <span class="mini">The files go to Netlify's CDN at a permanent https address and stay up until you
+          take the link down. Share again to push your latest changes.</span>
+        <span class="mini share-mode-why hidden" id="shareCloudWhy"></span>
+      </label>
+    </div>
+    <div id="shareTunnelOpts">
+      <label class="opt inline"><input type="checkbox" id="shareGuest"> Let visitors annotate (guest review)</label>
+      <span class="mini modal-hint">Guests leave notes on the page, signed with their name. Exports, resolving and
+        your files stay locked to this machine.</span>
+    </div>
+    <div id="shareCloudOpts" class="hidden">
+      <label>Netlify access token <span id="shareTokenState" class="mini"></span>
+        <input id="shareToken" type="password" spellcheck="false" placeholder="paste a personal access token">
+        <span class="mini">A free account at netlify.com → User settings → Applications → Personal access tokens.
+          Stored encrypted in your system keychain, never in a plain file.</span>
+      </label>
+    </div>
+    <label id="shareVersionRow">Version visitors see
       <select id="shareVersion"></select>
-      <span class="mini">Pin the link to a snapshot and reviewers see that exact state while you keep
+      <span class="mini" id="shareVersionHint">Pin the link to a snapshot and reviewers see that exact state while you keep
         editing live. Pinned guests can annotate until a newer snapshot exists.</span>
     </label>
     <div id="shareCurrent" class="share-current hidden">
       <span class="mini">Shared right now:</span>
       <div class="row"><input id="shareLinkText" type="text" readonly spellcheck="false"><button id="shareCopy" class="small">Copy</button></div>
     </div>
+    <div id="shareCloudCurrent" class="share-current hidden">
+      <span class="mini" id="shareCloudLabel">Up 24/7:</span>
+      <div class="row"><input id="shareCloudLinkText" type="text" readonly spellcheck="false"><button id="shareCloudCopy" class="small">Copy</button><button id="shareCloudOpen" class="small">Open</button></div>
+    </div>
     <div class="modal-actions">
       <button id="shareStopBtn" class="small hidden">Stop sharing</button>
+      <button id="shareCloudStopBtn" class="small hidden">Take the 24/7 link down</button>
       <button id="shareCancel" class="small">Cancel</button>
       <button id="shareGo" class="primary small">Share</button>
     </div>
   </div>
 </div>
 
-<!-- Publish modal [PRO]: push the files to a real host (Netlify first). -->
-<div id="publishModal" class="modal hidden">
-  <div class="modal-card">
-    <h3>Publish <span id="pubName" class="mini"></span></h3>
-    <p class="modal-hint">Uploads the site's files to Netlify's CDN. The first publish creates the
-      site; every publish after that updates the same address.</p>
-    <label>Netlify access token <span id="pubTokenState" class="mini"></span>
-      <input id="pubToken" type="password" spellcheck="false" placeholder="paste a personal access token">
-      <span class="mini">From app.netlify.com → User settings → Applications → Personal access tokens.
-        Stored encrypted in your system keychain, never in a plain file.</span>
-    </label>
-    <label>What to publish
-      <select id="pubVersion"></select>
-      <span class="mini">The files as they are right now, or any snapshot — a snapshot publishes
-        byte-for-byte, so deploys are reproducible.</span>
-    </label>
-    <div id="pubLinked" class="share-current hidden">
-      <span class="mini" id="pubLinkedText"></span>
-      <button id="pubUnlink" class="link-btn">Publish to a new site instead&hellip;</button>
-    </div>
-    <div id="pubStatus" class="rt-status hidden"></div>
-    <div class="modal-actions">
-      <button id="pubCancel" class="small">Cancel</button>
-      <button id="pubGo" class="primary small">Publish</button>
-    </div>
-  </div>
-</div>
-
 <div id="aboutModal" class="modal hidden">
   <div class="modal-card about">
-    <svg class="mark big" viewBox="0 0 32 32" aria-hidden="true">
-      <defs><mask id="markCutBig">
-        <rect width="32" height="32" rx="9" fill="#fff"/>
-        <path d="M16 6.4v8.8" stroke="#000" stroke-width="3.1" stroke-linecap="round"/>
-        <path d="M10.9 13.1 16 19.2l5.1-6.1" fill="none" stroke="#000" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M6.7 24.3c1.85-2.1 3.75-2.1 5.6 0s3.75 2.1 5.6 0 3.75-2.1 5.6 0" fill="none" stroke="#000" stroke-width="2.7" stroke-linecap="round"/>
-      </mask></defs>
-      <rect width="32" height="32" rx="9" fill="currentColor" mask="url(#markCutBig)"/>
-    </svg>
+    <img class="mark big" src="slurp-logo.png" alt="" aria-hidden="true">
     <h3>SiteSlurp Studio <span id="aboutVersion" class="mini"></span></h3>
     <p class="modal-hint">Slurp any website into editable files, host it locally, manage every client site in one place.</p>
     <p class="modal-hint mini">siteslurp.com</p>

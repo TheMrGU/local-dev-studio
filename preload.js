@@ -17,7 +17,7 @@ const INVOKE = new Set([
   'sb:consoleTail', 'sb:copyAgent', 'sb:copyText',
   'version:create', 'version:list', 'version:diff', 'version:readFile', 'version:restore',
   'runtime:state', 'runtime:restart',
-  'review:start', 'review:stop', 'review:history', 'review:export',
+  'review:start', 'review:stop', 'review:history', 'review:export', 'review:import',
   'audit:run',
   'calibration:promote', 'calibration:get', 'calibration:update',
   'calibration:removeAnchor', 'calibration:removePreference',

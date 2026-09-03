@@ -16,10 +16,12 @@ const BROWSER_GLOBALS = {
   window: 'readonly', document: 'readonly', navigator: 'readonly',
   console: 'readonly', setTimeout: 'readonly', clearTimeout: 'readonly',
   setInterval: 'readonly', clearInterval: 'readonly', Event: 'readonly',
-  URL: 'readonly', localStorage: 'readonly', fetch: 'readonly',
+  URL: 'readonly', localStorage: 'readonly', sessionStorage: 'readonly', fetch: 'readonly',
   location: 'readonly', getComputedStyle: 'readonly',
   requestAnimationFrame: 'readonly', CSS: 'readonly',
   ResizeObserver: 'readonly', FileReader: 'readonly',
+  self: 'readonly', addEventListener: 'readonly',
+  CSSRule: 'readonly', Element: 'readonly',
 };
 
 export default [
