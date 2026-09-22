@@ -43,7 +43,21 @@ inside the app and runs on Electron's own runtime.
    deduped by content hash across pages. Scroll-reveal content frozen at `opacity: 0` (its
    scripts having been stripped) is unhidden, so the page looks like it did live.
 3. **Fix videos** — the capture engine drops `<video>` sources; SiteSlurp downloads the
-   originals, wires them in locally, and adds `muted` so autoplay works.
+   originals, wires them in locally, and adds `muted` so autoplay works. With **Keep
+   JavaScript** on, a second pass replays every captured page in a hidden browser with the
+   network recorder running and saves everything the page fetched — script chunks, 3D meshes,
+   compressed textures, decoder `.wasm`, web workers, audio — at its original path, then
+   rewrites the references. That is what makes a WebGL site (a Vite + three.js experience whose
+   whole world streams in at runtime) work from the local copy instead of coming up as an empty
+   `<div>`. The recorder follows the site to wherever it really answers (`igloo.inc` 308s to
+   `www.igloo.inc`) and files those responses as the site's own, and it records a desktop pass
+   before the phone pass so the assets a desktop visitor gets are on disk too. When the
+   server's page is an app shell (an empty body the scripts fill — every Vite/React/three.js
+   experience), the capture serves that original document rather than the rendered snapshot:
+   running the app again on top of its own built DOM leaves two apps fighting and a scroll that
+   does nothing. The rendered DOM stays in the raw capture folder. Grab bundles say so too: an
+   element that is a `<canvas>` or an empty container gets a "Drawn by script" section pointing
+   at the scripts and runtime files, because its HTML and CSS are the frame, not the picture.
 4. **Host** — one click serves any site on localhost and opens it at its real homepage (the
    page whose URL you captured), with Range support so video seeks and no-cache headers so your
    edits show on refresh. Multiple sites at once on different ports. Both the IPv4 and IPv6

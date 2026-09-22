@@ -137,7 +137,10 @@
           <label class="opt-main"><input type="checkbox" id="keepScripts"> Keep JavaScript (3D &amp; WebGL sites)</label>
           <p class="opt-help">Normally scripts are removed, leaving a frozen snapshot. Keep them when a
             site draws itself with code &mdash; three.js heroes, WebGL, canvas animations &mdash; so the
-            captured page still runs. Some kept scripts may still call out to the original site.</p>
+            captured page still runs. SiteSlurp then replays each page in a hidden browser and saves
+            everything it fetches (script chunks, 3D models, textures, decoders, audio) at its original
+            path, so the copy works offline. Content only a login unlocks needs a cookies file below
+            &mdash; the replay doesn't see the "signed in" profile.</p>
         </div>
 
         <div class="opt-row">

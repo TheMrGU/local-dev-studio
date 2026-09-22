@@ -43,6 +43,7 @@ const versions = require('./lib/versions');
 const { diffSegments } = require('./lib/diff');
 const { fixVideos } = require('./lib/videofix');
 const { fixModels } = require('./lib/modelfix');
+const { mirrorSite } = require('./lib/mirror');
 const { GrabManager } = require('./lib/grab');
 const { MenuManager } = require('./lib/menu');
 const { zipFolder, zipFiles, folderEntries } = require('./lib/zip');
@@ -755,6 +756,37 @@ async function sitemapPageList(url, co, signal) {
   return { urls, partial: urls.length < scoped.length };
 }
 
+/** The two passes that make a scripts-kept capture stand on its own: the
+ *  network mirror (what the page really fetched — chunks, models, textures,
+ *  workers, audio), then the text scan for anything only a later interaction
+ *  would have pulled in. Both are best-effort; only a cancel propagates. */
+async function mirrorRuntime(dir, url, co, manifest, signal) {
+  send('run:status', { phase: 'mirror', msg: 'Mirroring runtime files (3D, textures, audio)' });
+  const mirrored = await versions.suppressAuto(() => mirrorSite(dir, url, {
+    mobile: !!co.mobile,
+    headers: co.headers || [],
+    cookiesFile: co.cookiesFile || '',
+    entry: manifest && manifest.entry,
+    signal,
+  }, runLog)).catch(err => {
+    if (err.canceled) throw err;
+    log.warn('mirror', err);
+    return null;
+  });
+  if (mirrored && mirrored.files) {
+    runLog(`  mirrored ${mirrored.files} runtime file(s), ${(mirrored.bytes / 1048576).toFixed(1)} MB`
+      + (mirrored.deduped ? `, ${mirrored.deduped} script(s) restored to their original path` : ''));
+    if (mirrored.documents) {
+      runLog(`  ${mirrored.documents} page(s) are built by their scripts — the original document is served so the app boots clean`);
+    }
+  }
+  if (mirrored) writeManifest(dir, { mirror: { files: mirrored.files, bytes: mirrored.bytes, pages: mirrored.pages, documents: mirrored.documents || 0, origins: mirrored.origins || [], at: new Date().toISOString() } });
+  send('run:status', { phase: 'models', msg: 'Checking for assets the scripts still reference' });
+  const models = await versions.suppressAuto(() => fixModels(dir, url, runLog, { origins: (mirrored && mirrored.origins) || [] }))
+    .catch(err => { log.warn('modelfix', err); return 0; });
+  if (models) runLog(`  mirrored ${models} more asset(s) referenced in scripts`);
+}
+
 async function runCapture(opts) {
   const { controller } = claimJob('A capture');
   const started = Date.now();
@@ -817,10 +849,7 @@ async function runCapture(opts) {
     if (co.keepScripts) {
       // Kept scripts fetch assets at runtime (3D payloads, lazy galleries) that
       // SingleFile never saw — mirror them so the local copy stands alone.
-      send('run:status', { phase: 'models', msg: 'Fetching 3D assets' });
-      const models = await versions.suppressAuto(() => fixModels(outDir, url, runLog))
-        .catch(err => { log.warn('modelfix', err); return 0; });
-      if (models) runLog(`  mirrored ${models} runtime asset(s)`);
+      await mirrorRuntime(outDir, url, co, readManifest(outDir), controller.signal);
     }
 
     send('run:status', { phase: 'thumb', msg: 'Rendering preview' });
@@ -868,9 +897,7 @@ async function runExtract(rawDir, { overwrite = false } = {}) {
     send('run:status', { phase: 'videos', msg: 'Restoring stripped videos' });
     await versions.suppressAuto(() => fixVideos(outDir, runLog)).catch(err => log.warn('videofix', err));
     if (manifest.keepScripts && manifest.url) {
-      send('run:status', { phase: 'models', msg: 'Fetching 3D assets' });
-      await versions.suppressAuto(() => fixModels(outDir, manifest.url, runLog))
-        .catch(err => log.warn('modelfix', err));
+      await mirrorRuntime(outDir, manifest.url, captureOptionsFrom(manifest), manifest, controller.signal);
     }
     send('run:status', { phase: 'thumb', msg: 'Rendering preview' });
     await makeThumb(outDir);
@@ -1006,9 +1033,7 @@ async function runRecapture(project) {
       if (fixed) runLog(`  restored ${fixed} video(s)`);
     }
     if (co.keepScripts) {
-      send('run:status', { phase: 'models', msg: 'Fetching 3D assets' });
-      await versions.suppressAuto(() => fixModels(project.path, manifest.url, runLog))
-        .catch(err => log.warn('modelfix', err));
+      await mirrorRuntime(project.path, manifest.url, co, readManifest(project.path), controller.signal);
     }
 
     send('run:status', { phase: 'thumb', msg: 'Rendering preview' });
@@ -2351,7 +2376,8 @@ function runSelfTest() {
           return true;
         })()`);
 
-        const deadline = Date.now() + 180000;
+        // Capture, extract, then a desktop and a phone mirror pass of a 3D site.
+        const deadline = Date.now() + 330000;
         let status = '';
         do {
           await sleep(1000);

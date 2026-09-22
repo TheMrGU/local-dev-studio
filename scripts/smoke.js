@@ -46,7 +46,7 @@ let output = '';
 child.stdout.on('data', d => { output += d; });
 child.stderr.on('data', d => { output += d; });
 
-const budget = captureUrl ? 240000 : 90000;
+const budget = captureUrl ? 420000 : 90000;
 const timer = setTimeout(() => {
   console.error(`timed out after ${budget / 1000}s — killing`);
   child.kill();

@@ -61,6 +61,7 @@ const calibrationStore = require('../lib/calibration');
 const { exportReview, styleLine, renderAnnotation, renderReviewMd } = require('../lib/reviewExport');
 const { ReviewManager } = require('../lib/review');
 const { fixModels } = require('../lib/modelfix');
+const { mirrorSite, parseCookiesFile, localSegments, siteOrigins, builtByScripts, absolutizeDocument, documentReferences } = require('../lib/mirror');
 const { GrabManager, localPathFor } = require('../lib/grab');
 const { MenuManager } = require('../lib/menu');
 const { locateSource } = require('../lib/sourceline');
@@ -391,6 +392,294 @@ async function modelfixTests() {
     const count = await fixModels(dir, 'https://site.test/', () => {});
     eq(count, 0);
     eq(fs.readFileSync(path.join(dir, 'a.html'), 'utf8'), page);
+  });
+
+  await check('treats the hosts the mirror saw the site answer on as the site itself', async () => {
+    const server = http.createServer((req, res) => {
+      if (req.url === '/models/a.glb') { res.writeHead(200); res.end('GLB'); } else { res.writeHead(404); res.end(); }
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const dir = scratch('modelfix-origins');
+      fs.writeFileSync(path.join(dir, '_.html'), `<!--\n url: https://site.test/ \n--><script>load("${origin}/models/a.glb")</script>`);
+      const count = await fixModels(dir, 'https://site.test/', () => {}, { origins: [origin] });
+      eq(count, 1);
+      ok(fs.existsSync(path.join(dir, 'models', 'a.glb')), 'landed at its real path, not under assets/remote');
+      ok(fs.readFileSync(path.join(dir, '_.html'), 'utf8').includes('load("/models/a.glb")'), 'reference rewritten root-relative');
+    } finally {
+      server.close();
+    }
+  });
+}
+
+/* ---------------- mirror ---------------- */
+async function mirrorTests() {
+  console.log('\nmirror');
+
+  // A fake recorder standing in for the offscreen browser: hands the sink
+  // exactly what the DevTools Network domain would have.
+  const fakeRecord = responses => async (pageUrl, { sink }) => {
+    for (const r of responses[pageUrl] || []) sink({ status: 200, ...r, body: Buffer.from(r.body) });
+    return { requests: (responses[pageUrl] || []).length, failed: [] };
+  };
+
+  await check('mirrors runtime fetches at their real paths and rewrites every reference', async () => {
+    const dir = scratch('mirror-site');
+    const entry = 'const b="https://site.test/";import("./App-abc.js");fetch("https://cdn.example.com/lib/draco.wasm")';
+    fs.mkdirSync(path.join(dir, 'assets', 'scripts'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'css'), { recursive: true });
+    // Extraction wrote the inlined entry module under a hash name.
+    fs.writeFileSync(path.join(dir, 'assets', 'scripts', 'script-0a03.js'), entry);
+    fs.writeFileSync(path.join(dir, 'css', 'style-1.css'), '@font-face{src:url(https://site.test/assets/f.woff2)}');
+    fs.writeFileSync(path.join(dir, '_.html'), [
+      '<!DOCTYPE html> <html lang=en><!--\n Page saved with SingleFile \n url: https://site.test/ \n-->',
+      '<script type=module crossorigin src="assets/scripts/script-0a03.js"></script>',
+      '<link rel=canonical href=https://site.test/><div id=app></div>',
+    ].join('\n'));
+    fs.writeFileSync(path.join(dir, '_index.html'), '<ul><li><a href="_.html">Home</a></li></ul>');
+
+    const stats = await mirrorSite(dir, 'https://site.test/', {
+      entry: '_.html',
+      record: fakeRecord({
+        'https://site.test/': [
+          { url: 'https://site.test/assets/index-2eb6.js', mime: 'application/javascript', body: entry },
+          { url: 'https://site.test/assets/App-abc.js', mime: 'application/javascript', body: 'load("https://site.test/assets/geo/igloo.drc?v=2")' },
+          { url: 'https://site.test/assets/geo/igloo.drc?v=2', mime: 'application/octet-stream', body: 'DRACO' },
+          { url: 'https://site.test/assets/f.woff2', mime: 'font/woff2', body: 'wOF2' },
+          { url: 'https://cdn.example.com/lib/draco.wasm', mime: 'application/wasm', body: '\0asm' },
+          { url: 'https://site.test/', mime: 'text/html', body: '<html>' },              // the document itself
+          { url: 'https://site.test/api/', mime: 'application/json', body: '{}' },       // directory-shaped
+          { url: 'blob:https://site.test/abc', mime: 'image/png', body: 'x' },
+          // The URL parser collapses dot-dot segments before they reach the
+          // path mapper — this is a root file, not an escape.
+          { url: 'https://site.test/../../top.js', mime: 'text/javascript', body: 'x' },
+          { url: 'https://site.test/a/b%3Cc%3E.js', mime: 'text/javascript', body: 'x' },
+        ],
+      }),
+    }, () => {});
+
+    eq(stats.pages, 1);
+    eq(stats.files, 7, 'files: ');
+    eq(stats.deduped, 1, 'deduped: ');
+    eq(fs.readFileSync(path.join(dir, 'assets', 'geo', 'igloo.drc'), 'utf8'), 'DRACO');
+    eq(fs.readFileSync(path.join(dir, 'assets', 'remote', 'cdn.example.com', 'lib', 'draco.wasm'), 'utf8'), '\0asm');
+    ok(fs.existsSync(path.join(dir, 'top.js')), 'dot-dot collapsed to a root file');
+    ok(fs.existsSync(path.join(dir, 'a', 'b_c_.js')), 'characters Windows refuses are replaced');
+    ok(!fs.existsSync(path.join(path.dirname(dir), 'top.js')), 'nothing escapes the site folder');
+    ok(!fs.existsSync(path.join(dir, 'api')), 'directory-shaped fetch skipped');
+    ok(!fs.existsSync(path.join(dir, 'assets', 'scripts', 'script-0a03.js')), 'duplicate extracted script removed');
+
+    const html = fs.readFileSync(path.join(dir, '_.html'), 'utf8');
+    ok(html.includes('url: https://site.test/ '), 'SingleFile header comment left intact: ' + html);
+    ok(html.includes('src="/assets/index-2eb6.js"'), 'page points at the mirrored entry module: ' + html);
+    const index = fs.readFileSync(path.join(dir, 'assets', 'index-2eb6.js'), 'utf8');
+    ok(index.includes('const b="/"'), 'bare origin literal becomes root-relative: ' + index);
+    ok(index.includes('fetch("/assets/remote/cdn.example.com/lib/draco.wasm")'), 'cross-origin URL rewritten: ' + index);
+    ok(index.includes('import("./App-abc.js")'), 'relative import untouched: ' + index);
+    const app = fs.readFileSync(path.join(dir, 'assets', 'App-abc.js'), 'utf8');
+    ok(app.includes('load("/assets/geo/igloo.drc")'), 'query-string variant rewritten to the file: ' + app);
+    const css = fs.readFileSync(path.join(dir, 'css', 'style-1.css'), 'utf8');
+    ok(css.includes('url(/assets/f.woff2)'), 'extracted css rewritten: ' + css);
+    eq(fs.readFileSync(path.join(dir, 'assets', 'geo', 'igloo.drc'), 'utf8'), 'DRACO', 'binary left verbatim');
+    const manifestish = fs.readFileSync(path.join(dir, '_index.html'), 'utf8');
+    eq(manifestish, '<ul><li><a href="_.html">Home</a></li></ul>', 'hub untouched');
+  });
+
+  await check('never overwrites what extraction already wrote, and records every page', async () => {
+    const dir = scratch('mirror-pages');
+    fs.writeFileSync(path.join(dir, '_.html'), '<!--\n url: https://site.test/ \n--><p>home</p>');
+    fs.writeFileSync(path.join(dir, '_about.html'), '<!--\n url: https://site.test/about \n--><p>about</p>');
+    fs.mkdirSync(path.join(dir, 'assets', 'images'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'assets', 'images', 'hero.png'), 'extracted-bytes');
+    const seen = [];
+    const stats = await mirrorSite(dir, 'https://site.test/', {
+      record: async (pageUrl, { sink }) => {
+        seen.push(pageUrl);
+        sink({ url: 'https://site.test/assets/images/hero.png', mime: 'image/png', status: 200, body: Buffer.from('live-bytes') });
+        sink({ url: `https://site.test/chunk-${seen.length}.js`, mime: 'text/javascript', status: 200, body: Buffer.from('x') });
+        return { requests: 2, failed: [] };
+      },
+    }, () => {});
+    eq(seen, ['https://site.test/', 'https://site.test/about']);
+    eq(stats.pages, 2);
+    eq(stats.files, 2, 'only the chunks were new: ');
+    eq(fs.readFileSync(path.join(dir, 'assets', 'images', 'hero.png'), 'utf8'), 'extracted-bytes');
+  });
+
+  await check('falls back to a plain download when the browser dropped a body', async () => {
+    const server = http.createServer((req, res) => {
+      if (req.url === '/big/model.glb') { res.writeHead(200); res.end('GLB'); } else { res.writeHead(404); res.end(); }
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const dir = scratch('mirror-fallback');
+      fs.writeFileSync(path.join(dir, '_.html'), `<!--\n url: ${origin}/ \n--><script>load("${origin}/big/model.glb")</script>`);
+      const stats = await mirrorSite(dir, origin + '/', {
+        record: async (pageUrl, { sink }) => {
+          // What the protocol hands back for a worker's fetch: an empty body.
+          sink({ url: `${origin}/big/model.glb`, mime: 'model/gltf-binary', status: 200, body: Buffer.alloc(0) });
+          return { requests: 1, failed: [`${origin}/big/model.glb`, `${origin}/missing.bin`] };
+        },
+      }, () => {});
+      eq(stats.files, 1);
+      eq(stats.failed, 1);
+      eq(fs.readFileSync(path.join(dir, 'big', 'model.glb'), 'utf8'), 'GLB');
+      ok(fs.readFileSync(path.join(dir, '_.html'), 'utf8').includes('load("/big/model.glb")'), 'reference rewritten');
+    } finally {
+      server.close();
+    }
+  });
+
+  await check('a cancel mid-mirror propagates as a cancel', async () => {
+    const dir = scratch('mirror-cancel');
+    fs.writeFileSync(path.join(dir, '_.html'), '<!--\n url: https://site.test/ \n--><p>x</p>');
+    const controller = new AbortController();
+    controller.abort();
+    let err = null;
+    try { await mirrorSite(dir, 'https://site.test/', { signal: controller.signal, record: async () => ({ failed: [] }) }); }
+    catch (e) { err = e; }
+    ok(err && err.canceled, 'canceled error expected');
+  });
+
+  await check('reads Netscape and JSON cookie exports', () => {
+    const netscape = [
+      '# Netscape HTTP Cookie File',
+      '.site.test\tTRUE\t/\tTRUE\t1893456000\tsession\tabc123',
+      '#HttpOnly_.site.test\tTRUE\t/app\tFALSE\t0\tcsrf\txyz',
+      'garbage line',
+    ].join('\n');
+    const a = parseCookiesFile(netscape);
+    eq(a.length, 2);
+    eq(a[0], { url: 'https://site.test/', name: 'session', value: 'abc123', domain: '.site.test', path: '/', secure: true, httpOnly: false, expirationDate: 1893456000 });
+    eq(a[1].httpOnly, true);
+    eq(a[1].url, 'http://site.test/app');
+    const b = parseCookiesFile(JSON.stringify([{ name: 'sid', value: '1', domain: 'site.test', path: '/', secure: true, expirationDate: 5 }, { nope: true }]));
+    eq(b.length, 1);
+    eq(b[0].url, 'https://site.test/');
+    eq(parseCookiesFile('not json ['), []);
+  });
+
+  await check('maps URLs to safe local paths', () => {
+    const o = 'https://site.test';
+    eq(localSegments('https://site.test/assets/a%20b/c.js?x=1#f', o), ['assets', 'a b', 'c.js']);
+    eq(localSegments('https://cdn.x.com/lib/d.wasm', o), ['assets', 'remote', 'cdn.x.com', 'lib', 'd.wasm']);
+    eq(localSegments('https://site.test/', o), null);
+    eq(localSegments('https://site.test/dir/', o), null);
+    eq(localSegments('https://site.test/a/../../x.js', o), ['x.js'], 'the URL parser already collapsed it: ');
+    eq(localSegments('https://site.test/a/%2e%2e/x.js', o), ['x.js'], 'encoded dot-dot collapsed too: ');
+    eq(localSegments('https://site.test/con%3Afig.js', o), ['con_fig.js'], 'reserved characters replaced: ');
+    eq(localSegments('blob:https://site.test/abc', o), null);
+    eq(localSegments('data:text/plain,hi', o), null);
+  });
+
+  await check('files from the host the site redirects to land at their real paths', async () => {
+    // Typed igloo.inc, served from www.igloo.inc: the bundle builds every fetch
+    // from location.origin, so www files are the site's own, not a third party.
+    const dir = scratch('mirror-redirect');
+    fs.writeFileSync(path.join(dir, '_.html'), '<!--\n url: https://site.test/ \n--><script type=module src="https://www.site.test/assets/index.js"></script>');
+    const calls = [];
+    const stats = await mirrorSite(dir, 'https://site.test/', {
+      record: async (pageUrl, { sink, onDocument, mobile }) => {
+        calls.push({ pageUrl, mobile });
+        onDocument('https://www.site.test/');
+        sink({ url: 'https://www.site.test/assets/index.js', mime: 'text/javascript', status: 200,
+          body: Buffer.from('const o="https://www.site.test";const b="https://site.test/";fetch("https://cdn.other.com/x.js")') });
+        sink({ url: 'https://www.site.test/assets/geo/a.drc', mime: 'application/octet-stream', status: 200, body: Buffer.from('DRC') });
+        sink({ url: 'https://cdn.other.com/x.js', mime: 'text/javascript', status: 200, body: Buffer.from('x') });
+        return { requests: 3, failed: [], documentUrl: 'https://www.site.test/' };
+      },
+    }, () => {});
+    eq(calls, [{ pageUrl: 'https://site.test/', mobile: false }], 'one desktop pass when mobile is off: ');
+    eq(stats.origins, ['https://www.site.test']);
+    eq(stats.files, 3);
+    ok(fs.existsSync(path.join(dir, 'assets', 'geo', 'a.drc')), 'redirected-host file at its real path');
+    ok(!fs.existsSync(path.join(dir, 'assets', 'remote', 'www.site.test')), 'nothing filed as third party: ' + JSON.stringify(fs.readdirSync(path.join(dir, 'assets'))));
+    ok(fs.existsSync(path.join(dir, 'assets', 'remote', 'cdn.other.com', 'x.js')), 'a real third party still goes under assets/remote');
+    const index = fs.readFileSync(path.join(dir, 'assets', 'index.js'), 'utf8');
+    ok(index.includes('const o="/"') && index.includes('const b="/"'), 'both spellings of the origin become root-relative: ' + index);
+    ok(index.includes('fetch("/assets/remote/cdn.other.com/x.js")'), 'third-party URL rewritten: ' + index);
+    const html = fs.readFileSync(path.join(dir, '_.html'), 'utf8');
+    ok(html.includes('src="/assets/index.js"'), 'page reference rewritten: ' + html);
+  });
+
+  await check('records a phone pass after the desktop pass when the mobile layout was asked for', async () => {
+    const dir = scratch('mirror-phone');
+    fs.writeFileSync(path.join(dir, '_.html'), '<!--\n url: https://site.test/ \n--><p>x</p>');
+    const calls = [];
+    const stats = await mirrorSite(dir, 'https://site.test/', {
+      mobile: true,
+      record: async (pageUrl, { sink, mobile, budget }) => {
+        calls.push({ mobile, budget });
+        sink({ url: 'https://site.test/shared.js', mime: 'text/javascript', status: 200, body: Buffer.from('s') });
+        sink({ url: `https://site.test/${mobile ? 'phone' : 'desktop'}.ktx2`, mime: 'application/octet-stream', status: 200, body: Buffer.from('k') });
+        return { requests: 2, failed: [] };
+      },
+    }, () => {});
+    eq(calls.map(c => c.mobile), [false, true], 'desktop first, then phone: ');
+    ok(calls[0].budget > calls[1].budget, 'the desktop pass gets the bigger budget');
+    eq(stats.pages, 1, 'two passes are still one page: ');
+    eq(stats.files, 3, 'the shared file is written once: ');
+    ok(fs.existsSync(path.join(dir, 'desktop.ktx2')) && fs.existsSync(path.join(dir, 'phone.ktx2')), 'both device-specific files kept');
+  });
+
+  await check('knows the spellings of a site origin', () => {
+    eq([...siteOrigins('https://igloo.inc/')].sort(), ['http://igloo.inc', 'http://www.igloo.inc', 'https://igloo.inc', 'https://www.igloo.inc']);
+    eq([...siteOrigins('http://www.a.test:8080/x')].sort(), ['http://a.test:8080', 'http://www.a.test:8080', 'https://a.test:8080', 'https://www.a.test:8080']);
+    eq([...siteOrigins('blob:https://a.test/x', 'nope')], []);
+    eq(localSegments('https://www.site.test/a.js', siteOrigins('https://site.test/')), ['a.js']);
+    eq(localSegments('https://cdn.test/a.js', siteOrigins('https://site.test/')), ['assets', 'remote', 'cdn.test', 'a.js']);
+  });
+
+  await check('tells an app shell from a server-rendered page', () => {
+    ok(builtByScripts('<!doctype html><html><head><title>x</title></head><body></body></html>'), 'empty body');
+    ok(builtByScripts('<html><body><div id="root"></div><script src="/app.js"></script><noscript>Enable JS</noscript></body></html>'), 'one mount point');
+    ok(builtByScripts('<html><body><div id="app"><div id="webgl"></div></div><svg><path d="M0 0"/></svg></body></html>'), 'shell with an inline svg');
+    ok(!builtByScripts('<html><body><header><nav><a href="/">Home</a><a href="/about">About</a></nav></header><main><h1>Welcome to our site</h1><p>We build things for people who need them built.</p></main></body></html>'), 'real content');
+    ok(!builtByScripts(''), 'nothing to judge');
+  });
+
+  await check('resolves a document’s relative references against its live URL', () => {
+    const origins = siteOrigins('https://site.test/');
+    const out = absolutizeDocument(
+      '<link rel=icon href="favicon.png"><script src="./js/app.js"></script><img src="/keep.png" srcset="a.png 1x, ../b.png 2x"><a href="https://other.test/x">x</a><script src="//cdn.test/lib.js"></script><a href="#top">top</a>',
+      'https://www.site.test/blog/post', origins);
+    ok(out.includes('href="/blog/favicon.png"'), 'relative → root-relative: ' + out);
+    ok(out.includes('src="/blog/js/app.js"'), 'dot-relative → root-relative: ' + out);
+    ok(out.includes('src="/keep.png"'), 'root-relative untouched: ' + out);
+    ok(out.includes('srcset="/blog/a.png 1x, /b.png 2x"'), 'srcset resolved: ' + out);
+    ok(out.includes('href="https://other.test/x"'), 'absolute untouched: ' + out);
+    ok(out.includes('src="https://cdn.test/lib.js"'), 'protocol-relative gets a scheme: ' + out);
+    ok(out.includes('href="#top"'), 'fragment untouched: ' + out);
+    eq(documentReferences('<link href="/a.png"><script src="https://cdn.test/x.js"></script><a href="/dir/">d</a><a href="#f">f</a>', 'https://site.test/'),
+      ['https://site.test/a.png', 'https://cdn.test/x.js']);
+  });
+
+  await check('serves the original document when the page is built by its scripts', async () => {
+    const dir = scratch('mirror-shell');
+    // What SingleFile saved: the DOM the app built, class names and all.
+    fs.writeFileSync(path.join(dir, '_.html'), '<!--\n url: https://site.test/ \n-->' + '<html class="en mobile android"><body><div id=app><div id=webgl></div></div></body></html>');
+    fs.writeFileSync(path.join(dir, '_about.html'), '<!--' + String.fromCharCode(10) + ' url: https://site.test/about ' + String.fromCharCode(10) + '--><html><body><main><h1>About us</h1><p>Server rendered content that stays put and reads fine.</p></main></body></html>');
+    const shell = '<!doctype html><html lang="en"><head><link rel="icon" href="https://site.test/favicon.png"><script type="module" crossorigin src="https://site.test/assets/index-1.js"></script></head><body></body></html>';
+    const stats = await mirrorSite(dir, 'https://site.test/', {
+      entry: '_.html',
+      record: async (pageUrl, { sink }) => {
+        sink({ url: 'https://site.test/assets/index-1.js', mime: 'text/javascript', status: 200, body: Buffer.from('app') });
+        return {
+          requests: 1, failed: [], documentUrl: pageUrl,
+          documentHtml: pageUrl === 'https://site.test/' ? shell : '<html><body><main><h1>About us</h1><p>Server rendered content that stays put and reads fine.</p></main></body></html>',
+        };
+      },
+    }, () => {});
+    eq(stats.documents, 1, 'only the shell page swapped: ');
+    const home = fs.readFileSync(path.join(dir, '_.html'), 'utf8');
+    ok(home.includes('url: https://site.test/ '), 'header kept: ' + home);
+    ok(home.includes('<body></body>'), 'original empty body served: ' + home);
+    ok(!home.includes('id=app'), 'rendered DOM gone: ' + home);
+    ok(home.includes('src="/assets/index-1.js"'), 'mirrored script points local: ' + home);
+    ok(home.includes('href="https://site.test/favicon.png"'), 'un-mirrored reference left for the fallback download: ' + home);
+    ok(fs.readFileSync(path.join(dir, '_about.html'), 'utf8').includes('<h1>About us</h1>'), 'server-rendered page keeps its snapshot');
   });
 }
 
@@ -1849,6 +2138,35 @@ async function grabTests() {
       eq(cfg.mapped, true);
       eq(cfg.grabs, path.join(caps, '_grabs', 'grab-site'));
       ok(script.text.includes('__slurpGrab'), 'client body');
+    });
+
+    await check('a canvas or empty element gets a "drawn by script" note pointing at the scripts', async () => {
+      fs.writeFileSync(path.join(site, 'index.html'),
+        '<html><head><script type="module" src="/assets/index-1.js"></script></head><body><div id="webgl"><canvas></canvas></div><section class="hero"><img src="assets/images/pic.webp"></section></body></html>');
+      fs.writeFileSync(path.join(site, 'assets', 'index-1.js'), 'draw()');
+      const res = await request('POST', '/__siteslurp__/grab/save', {
+        slug: 'div-webgl-test2',
+        pageUrl: `http://127.0.0.1:${port}/`,
+        selector: '#webgl',
+        tag: 'div#webgl',
+        rect: { x: 0, y: 0, w: 1280, h: 800 },
+        html: '<div id="webgl"><canvas width="1280" height="800"></canvas></div>',
+        css: 'div#webgl { position: absolute; }',
+        assets: [],
+      });
+      eq(res.status, 200);
+      const md = fs.readFileSync(path.join(res.json.folder, 'GRAB.md'), 'utf8');
+      ok(md.includes('## Drawn by script'), 'note present: ' + md);
+      ok(md.includes('painted by the page'), 'canvas wording: ' + md);
+      ok(md.includes('- script: ' + path.join(site, 'assets', 'index-1.js')), 'script resolved to its local file: ' + md);
+
+      const plain = await request('POST', '/__siteslurp__/grab/save', {
+        slug: 'section-hero-test3',
+        pageUrl: `http://127.0.0.1:${port}/`,
+        selector: 'section.hero', tag: 'section.hero', rect: { x: 0, y: 0, w: 10, h: 10 },
+        html: '<section class="hero"><h1>Hello there</h1></section>', css: '', assets: [],
+      });
+      ok(!fs.readFileSync(path.join(plain.json.folder, 'GRAB.md'), 'utf8').includes('Drawn by script'), 'ordinary markup gets no note');
     });
 
     await check('save writes a bundle: manifest, html, css, derived asset paths', async () => {
@@ -3551,6 +3869,7 @@ async function sharingPowerTests() {
   await paletteTests();
   await extractTests();
   await modelfixTests();
+  await mirrorTests();
   await zipTests();
   await serverTests();
   await entryTests();
