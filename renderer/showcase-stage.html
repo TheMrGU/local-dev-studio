@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:; font-src 'self'; media-src file: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>ShowCase</title>
+<link rel="stylesheet" href="showcase-stage.css">
+</head>
+<body class="stage-body">
+
+<!-- The site view is composited over #stage by the main process. This page
+     only paints what surrounds it: the device bezel, the cards, the dark. -->
+<div class="stage" id="stage">
+  <div class="bezel hidden" id="bezel">
+    <div class="bezel-notch"></div>
+    <div class="bezel-base"></div>
+  </div>
+  <div class="bezel hidden" id="bezel2">
+    <div class="bezel-notch"></div>
+    <div class="bezel-base"></div>
+  </div>
+</div>
+
+<div class="slate hidden" id="slate">
+  <div class="slate-inner">
+    <div class="slate-brand">
+      <img src="nightshyft-mark.png" alt="" aria-hidden="true">
+      <span id="slateBrand">NightShyft Studio</span>
+      <span class="slate-eyebrow" id="slateEyebrow">presents</span>
+    </div>
+    <h1 id="slateTitle"></h1>
+    <p class="slate-tagline" id="slateTagline"></p>
+    <p class="slate-url" id="slateUrl"></p>
+  </div>
+  <div class="slate-foot" id="slateFoot"></div>
+</div>
+
+<div class="black hidden" id="black"></div>
+
+<div class="rec hidden" id="rec"><i></i>REC</div>
+
+<div class="hint" id="hint">
+  <span><kbd>Space</kbd> pause</span>
+  <span><kbd>←</kbd><kbd>→</kbd> shots</span>
+  <span><kbd>N</kbd><kbd>P</kbd> pages</span>
+  <span><kbd>↑</kbd><kbd>↓</kbd> speed</span>
+  <span><kbd>1</kbd>–<kbd>5</kbd> frame</span>
+  <span><kbd>C</kbd> cursor</span>
+  <span><kbd>B</kbd> black</span>
+  <span><kbd>Esc</kbd> end</span>
+</div>
+
+<audio id="music" loop preload="auto"></audio>
+
+<script src="showcase-stage.js"></script>
+</body>
+</html>

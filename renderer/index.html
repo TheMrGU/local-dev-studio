@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'">
-<title>SiteSlurp Studio</title>
+<title>Local Dev Studio</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -44,22 +44,29 @@
   <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 10 5-10 5L2 7l10-5Z"/><path d="m2 12 10 5 10-5M2 17l10 5 10-5"/></symbol>
   <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
   <symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5M9 8V2M15 8V2M6 8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8V4Z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 4h3v16H7zM14 4h3v16h-3z"/></symbol>
+  <symbol id="i-skip-back" viewBox="0 0 24 24"><path d="M19 20 9 12l10-8v16ZM5 19V5"/></symbol>
+  <symbol id="i-skip-forward" viewBox="0 0 24 24"><path d="m5 4 10 8-10 8V4ZM19 5v14"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></symbol>
+  <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></symbol>
+  <symbol id="i-move" viewBox="0 0 24 24"><path d="M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1"/><path d="M2 13h10M9 16l3-3-3-3"/></symbol>
+  <symbol id="i-present" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="m10 8 5 2.5L10 13V8ZM8 21h8M12 17v4"/></symbol>
 </svg>
 
 <!-- The window's own title bar. There is no OS frame and no menu strip behind
      this: the bar is the drag handle, and Windows paints only its three control
      buttons into the slot reserved on the right. -->
 <header class="topbar" id="topbar">
-  <div class="brand">
-    <img class="mark" src="slurp-logo.png" alt="" aria-hidden="true">
-    <h1>SiteSlurp</h1>
-  </div>
-
   <nav class="tabs" role="tablist" aria-label="Sections">
     <button class="tab on" id="tab-extractor" role="tab" aria-selected="true" aria-controls="view-extractor"
             title="Extractor (Ctrl+1)"><span class="tick" aria-hidden="true"></span>Extractor</button>
     <button class="tab" id="tab-studio" role="tab" aria-selected="false" aria-controls="view-studio"
             title="Studio (Ctrl+2)"><span class="tick" aria-hidden="true"></span>Studio<span class="tab-count" id="tabStudioCount"></span></button>
+    <button class="tab" id="tab-showcase" role="tab" aria-selected="false" aria-controls="view-showcase"
+            title="ShowCase (Ctrl+3)"><span class="tick" aria-hidden="true"></span>ShowCase<span class="tab-beta">Beta</span></button>
   </nav>
 
   <div class="topbar-right">
@@ -76,7 +83,7 @@
 <main>
 <section id="view-extractor" class="view" role="tabpanel" aria-labelledby="tab-extractor">
   <div class="pane-head">
-    <h2 class="pane-title">Paste a link. Slurp the whole site.</h2>
+    <h2 class="pane-title">Paste a link. Get the whole site.</h2>
     <p class="pane-sub">Rendered in a real browser, then unpacked into clean editable files you own.</p>
   </div>
 
@@ -137,7 +144,7 @@
           <label class="opt-main"><input type="checkbox" id="keepScripts"> Keep JavaScript (3D &amp; WebGL sites)</label>
           <p class="opt-help">Normally scripts are removed, leaving a frozen snapshot. Keep them when a
             site draws itself with code &mdash; three.js heroes, WebGL, canvas animations &mdash; so the
-            captured page still runs. SiteSlurp then replays each page in a hidden browser and saves
+            captured page still runs. Local Dev Studio then replays each page in a hidden browser and saves
             everything it fetches (script chunks, 3D models, textures, decoders, audio) at its original
             path, so the copy works offline. Content only a login unlocks needs a cookies file below
             &mdash; the replay doesn't see the "signed in" profile.</p>
@@ -253,12 +260,6 @@
 </section>
 
 <section id="view-studio" class="view hidden" role="tabpanel" aria-labelledby="tab-studio">
-  <div class="pane-head">
-    <h2 class="pane-title">Every site you manage, in one place.</h2>
-    <p class="pane-sub">Host any project on its own port, edit with live reload, and turn on-page
-      feedback into a spec an agent can build from. Drop a folder anywhere to add it.</p>
-  </div>
-
   <section id="serversStrip" class="servers hidden">
     <span class="servers-label">Hosting</span>
     <div id="serverChips"></div>
@@ -281,9 +282,212 @@
       <button class="icon-btn" id="btnRefresh" title="Refresh (F5)" aria-label="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
     </div>
     <div id="libRoot" class="lib-root"></div>
-    <div id="grid" class="grid"></div>
+    <!-- Sections: the user's own shelves, plus Captures and Unsorted for what
+         isn't on one yet. Each chip is also a drop target for a dragged card. -->
+    <div id="libSections" class="lib-sections" role="tablist" aria-label="Library sections"></div>
+    <div id="libGroups" class="lib-groups"></div>
     <div id="empty" class="empty hidden"></div>
   </section>
+</section>
+
+<!-- ShowCase: pick a site, set the motion, present. While a show runs the
+     right-hand panel turns into its remote. -->
+<section id="view-showcase" class="view hidden" role="tabpanel" aria-labelledby="tab-showcase">
+  <div class="pane-head">
+    <h2 class="pane-title">Put a site on the big screen.</h2>
+    <p class="pane-sub">Pick anything in your Studio and present it. ShowCase reads the page and directs it: an opening
+      hold, a walk along the navigation, a push-in on each section, a sweep across the cards, a flip to the phone,
+      a hop to the next page. Hidden reveal-on-scroll content comes back, videos play, cookie bars go. Record it
+      as an MP4 for your socials, or pick several sites to play them as a reel.</p>
+  </div>
+
+  <div class="sc-layout">
+    <section class="sc-pick">
+      <div class="lib-head">
+        <h3>Pick a site <span id="scPickCount" class="lib-count"></span></h3>
+        <span class="mini sc-pick-hint" id="scPickHint">Click one to present it. Click more to play them as a reel, in that order.</span>
+        <button class="small ghost hidden" id="scClear">Clear</button>
+      </div>
+      <div id="scGrid" class="sc-grid"></div>
+      <div id="scEmpty" class="empty hidden"><p>Nothing to present yet — capture a site in the Extractor, or drop a folder into Studio.</p></div>
+    </section>
+
+    <aside class="sc-side">
+      <div class="sc-panel" id="scDirector">
+        <button id="scPresent" class="primary sc-present" disabled>Present</button>
+        <p class="sc-keys">In the show: <kbd>Space</kbd> pause · <kbd>←</kbd><kbd>→</kbd> shots · <kbd>N</kbd> next page · <kbd>B</kbd> black · <kbd>Esc</kbd> end</p>
+
+        <div class="sc-group">
+          <div class="sc-label">Style</div>
+          <div class="seg seg-wrap" id="scStyle" role="radiogroup" aria-label="Style">
+            <button data-v="walkthrough" class="on" title="Every section, the navigation, the buttons, the other pages — a client presentation">Walkthrough</button>
+            <button data-v="reel" title="Thirty seconds a site: opening, a few highlights, the phone, next — for socials">Reel</button>
+            <button data-v="cinematic" title="Slow glides and push-ins, no pointer — let the design speak">Cinematic</button>
+            <button data-v="scroll" title="A steady glide down the page, nothing else">Scroll</button>
+            <button data-v="still" title="No motion — hold each page, then move on">Still</button>
+          </div>
+          <p class="sc-hint" id="scStyleHint"></p>
+        </div>
+
+        <div class="sc-group" id="scSpeedGroup">
+          <div class="sc-label">Speed <span class="sc-value" id="scSpeedValue">90 px/s</span></div>
+          <input type="range" id="scSpeed" min="20" max="400" step="10" value="90" aria-label="Scroll speed">
+          <div class="sc-scale"><span>Slow</span><span>Reading pace</span><span>Fast</span></div>
+        </div>
+
+        <div class="sc-group" id="scBeatsGroup">
+          <div class="sc-label">Shots</div>
+          <div class="sc-checks">
+            <label class="opt" title="Glide the pointer along the site's top navigation, hovering each link"><input type="checkbox" id="scNav" checked> Walk the navigation</label>
+            <label class="opt" title="Hover the main button above the fold and press it (without leaving)"><input type="checkbox" id="scButtons" checked> Hover the button</label>
+            <label class="opt" title="Push the camera in on the biggest picture in each section"><input type="checkbox" id="scDetails" checked> Push in on details</label>
+            <label class="opt" title="Sweep the pointer across grids of cards so their hover states show"><input type="checkbox" id="scCards" checked> Sweep the cards</label>
+            <label class="opt" title="Before leaving a page, show it on a phone for a few seconds"><input type="checkbox" id="scFlip"> Flip to a phone</label>
+            <label class="opt" title="Click through to the site's other pages, one after another"><input type="checkbox" id="scPages" checked> Visit other pages</label>
+          </div>
+        </div>
+
+        <div class="sc-group sc-two" id="scSectionsGroup">
+          <label class="opt" title="Ease to a stop at each section so the audience can take it in"><input type="checkbox" id="scSections" checked> Stop at sections</label>
+          <select id="scDwell" aria-label="How long to pause at a section">
+            <option value="1">1 s</option><option value="2">2 s</option><option value="2.5" selected>2.5 s</option><option value="4">4 s</option><option value="6">6 s</option><option value="10">10 s</option>
+          </select>
+        </div>
+        <div class="sc-group sc-two">
+          <span class="opt-text" title="How long the end of a page holds before the show moves on">Hold at page end</span>
+          <select id="scPageDwell" aria-label="How long to hold at the end of a page">
+            <option value="2">2 s</option><option value="4" selected>4 s</option><option value="6">6 s</option><option value="10">10 s</option><option value="20">20 s</option>
+          </select>
+        </div>
+        <div class="sc-group">
+          <label class="opt"><input type="checkbox" id="scLoop" checked> Loop when it runs out</label>
+        </div>
+
+        <div class="sc-group">
+          <div class="sc-label">Frame</div>
+          <div class="seg" id="scFrame" role="radiogroup" aria-label="Device frame">
+            <button data-v="none" class="on" title="Fill the screen">Full</button>
+            <button data-v="laptop" title="A laptop, 1440px wide">Laptop</button>
+            <button data-v="tablet" title="A tablet, 1180px wide">Tablet</button>
+            <button data-v="phone" title="A phone, 390px wide — the mobile layout, big">Phone</button>
+            <button data-v="duo" title="Laptop and phone side by side, scrolling together — the responsive design in one shot">Duo</button>
+          </div>
+        </div>
+        <div class="sc-group">
+          <div class="sc-label">Cursor</div>
+          <div class="seg" id="scCursor" role="radiogroup" aria-label="Cursor">
+            <button data-v="hidden" title="No pointer at all">Hidden</button>
+            <button data-v="ghost" class="on" title="A soft white pointer that glides to what it hovers">Ghost</button>
+            <button data-v="spotlight" title="Dims everything but a circle around the pointer">Spotlight</button>
+          </div>
+        </div>
+        <div class="sc-group sc-two">
+          <span class="opt-text">Zoom</span>
+          <select id="scZoom" aria-label="Zoom">
+            <option value="80">80%</option><option value="90">90%</option><option value="100" selected>100%</option><option value="110">110%</option><option value="125">125%</option><option value="150">150%</option>
+          </select>
+        </div>
+
+        <div class="sc-group">
+          <div class="sc-label">Polish</div>
+          <div class="sc-checks">
+            <label class="opt" title="Hide cookie bars, chat bubbles and pop-ups parked over the page"><input type="checkbox" id="scTidy" checked> Hide cookie bars &amp; chat</label>
+            <label class="opt" title="Content a reveal-on-scroll effect left invisible fades in as the camera reaches it"><input type="checkbox" id="scReveal" checked> Reveal hidden content</label>
+            <label class="opt" title="Videos play muted while on screen; lazy images load ahead"><input type="checkbox" id="scMedia" checked> Play videos</label>
+          </div>
+        </div>
+
+        <div class="sc-group">
+          <label class="opt"><input type="checkbox" id="scSlates" checked> Title card in, thank-you card out</label>
+          <input type="text" id="scTagline" placeholder="Tagline under the site name (optional)" spellcheck="false" aria-label="Tagline">
+        </div>
+        <div class="sc-group sc-two">
+          <label class="opt"><input type="checkbox" id="scProgress" checked> Progress line</label>
+          <label class="opt"><input type="checkbox" id="scCaptions" checked> Captions</label>
+        </div>
+
+        <div class="sc-group hidden" id="scReelGroup">
+          <div class="sc-label">Reel</div>
+          <div class="sc-two">
+            <span class="opt-text">Seconds per site</span>
+            <select id="scSiteSeconds" aria-label="Seconds per site">
+              <option value="0" selected>Until its story ends</option><option value="30">30 s</option><option value="45">45 s</option><option value="60">60 s</option><option value="90">90 s</option><option value="120">2 min</option><option value="300">5 min</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="sc-group">
+          <div class="sc-label">Record</div>
+          <label class="opt" title="Save the whole show — cards, bezels, motion — as an MP4 next to your captures, in Reels"><input type="checkbox" id="scRecord"> Record to MP4</label>
+          <div class="sc-music">
+            <button class="small" id="scMusic" title="Play an audio file under the show (it is in the recording too)">Music…</button>
+            <span class="sc-music-name" id="scMusicName">No music</span>
+            <button class="icon-btn small hidden" id="scMusicClear" title="No music" aria-label="Remove music">&times;</button>
+          </div>
+          <div class="sc-two hidden" id="scMusicVolumeRow">
+            <span class="opt-text">Volume</span>
+            <select id="scMusicVolume" aria-label="Music volume">
+              <option value="20">20%</option><option value="40">40%</option><option value="60" selected>60%</option><option value="80">80%</option><option value="100">100%</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="sc-group">
+          <div class="sc-label">Screen</div>
+          <select id="scDisplay" aria-label="Which display"></select>
+          <label class="opt"><input type="checkbox" id="scFullscreen" checked> Full screen</label>
+        </div>
+      </div>
+
+      <div class="sc-panel sc-remote hidden" id="scRemote">
+        <div class="sc-remote-head">
+          <span class="sc-live"><span class="tick"></span>On air<span class="sc-rec hidden" id="scRec">REC</span></span>
+          <button class="small ghost" id="scRemoteFocus" title="Bring the presentation window to the front">Show window</button>
+        </div>
+        <div class="sc-now">
+          <div class="sc-now-site" id="scNowSite"></div>
+          <div class="sc-now-page" id="scNowPage"></div>
+          <div class="sc-progress"><span id="scProgressBar"></span></div>
+        </div>
+        <div class="sc-transport">
+          <button class="icon-btn" id="scPrev" title="Previous shot (←)" aria-label="Previous shot"><svg class="icon"><use href="#i-skip-back"/></svg></button>
+          <button class="primary sc-play" id="scPlay" title="Pause / resume (Space)"><svg class="icon"><use href="#i-pause"/></svg><span>Pause</span></button>
+          <button class="icon-btn" id="scNext" title="Next shot (→)" aria-label="Next shot"><svg class="icon"><use href="#i-skip-forward"/></svg></button>
+        </div>
+        <div class="sc-board" id="scBoard"></div>
+        <div class="sc-group sc-two" id="scPageRow">
+          <button class="small" id="scPrevPage" title="Previous page (P)">‹ Page</button>
+          <span class="sc-value" id="scPageCount"></span>
+          <button class="small" id="scNextPage" title="Next page (N)">Page ›</button>
+        </div>
+        <div class="sc-group sc-two">
+          <span class="opt-text">Speed <span class="sc-value" id="scRemoteSpeedValue"></span></span>
+          <div class="sc-stepper">
+            <button class="small" id="scSlower" title="Slower (↓)" aria-label="Slower">−</button>
+            <button class="small" id="scFaster" title="Faster (↑)" aria-label="Faster">+</button>
+          </div>
+        </div>
+        <div class="sc-group hidden" id="scRemoteSites"></div>
+        <div class="sc-group">
+          <div class="seg" id="scRemoteFrame" aria-label="Frame">
+            <button data-v="none">Full</button><button data-v="laptop">Laptop</button><button data-v="tablet">Tablet</button><button data-v="phone">Phone</button><button data-v="duo">Duo</button>
+          </div>
+        </div>
+        <div class="sc-group">
+          <div class="seg" id="scRemoteCursor" aria-label="Cursor">
+            <button data-v="hidden">Hidden</button><button data-v="ghost">Ghost</button><button data-v="spotlight">Spotlight</button>
+          </div>
+        </div>
+        <div class="sc-group sc-row">
+          <button class="small pill" id="scBlack" title="Black screen (B)">Blackout</button>
+          <button class="small pill" id="scFull" title="Toggle full screen (F)">Full screen</button>
+          <button class="small pill" id="scRestart" title="This page from the top (Home)">Restart</button>
+          <button class="small pill" id="scRecordBtn" title="Start or stop recording">Record</button>
+        </div>
+        <button class="small sc-end" id="scEnd">End show</button>
+      </div>
+    </aside>
+  </div>
 </section>
 </main>
 
@@ -355,7 +559,7 @@
     <details class="advanced-block" id="agentAccess">
       <summary>Agent access</summary>
       <span class="mini">Let a coding agent work your reviews over MCP: it reads open annotations and your
-        calibration, fixes the code, resolves each note, and SiteSlurp photographs the proof.
+        calibration, fixes the code, resolves each note, and Local Dev Studio photographs the proof.
         Paste one of these while the app is running.</span>
       <label>Claude Code — run this in a terminal
         <div class="row"><input id="agentClaude" type="text" readonly spellcheck="false"><button id="agentClaudeCopy" class="small">Copy</button></div>
@@ -368,7 +572,7 @@
       <summary>Advanced</summary>
       <label>Page-capture engine <span id="setSfStatus" class="mini"></span>
         <input id="setSf" type="text" spellcheck="false" placeholder="bundled">
-        <span class="mini">Leave empty to use the copy that ships with SiteSlurp.</span>
+        <span class="mini">Leave empty to use the copy that ships with Local Dev Studio.</span>
       </label>
     </details>
     <button id="setCalibration" class="link-btn">Calibration — review your standing preferences and rating anchors&hellip;</button>
@@ -428,7 +632,7 @@
 <div id="attachModal" class="modal hidden">
   <div class="modal-card">
     <h3>Attach to a dev server</h3>
-    <p class="modal-hint">Your server keeps running in your own terminal. SiteSlurp connects to it and
+    <p class="modal-hint">Your server keeps running in your own terminal. Local Dev Studio connects to it and
       fronts it on a stable port of its own — Review Mode, Studio Browser and sharing all work, and
       nothing gets started, owned or killed.</p>
     <label>Where is it listening?
@@ -484,6 +688,22 @@
   </div>
 </div>
 
+<!-- Library section: create or rename, one field. -->
+<div id="sectionModal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="sectionTitle">New section</h3>
+    <p class="modal-hint">Sort the library into shelves of your own. Drag a card onto a section,
+      or use ⋯ → Move to section on any card.</p>
+    <label>Name
+      <input id="sectionName" type="text" spellcheck="false" maxlength="40" placeholder="e.g. Client Websites">
+    </label>
+    <div class="modal-actions">
+      <button id="sectionCancel" class="small">Cancel</button>
+      <button id="sectionSave" class="primary small">Create section</button>
+    </div>
+  </div>
+</div>
+
 <!-- Calibration manager: the first read/edit surface for the taste memory that
      until now only existed inside exported calibration.md files. -->
 <div id="calibrationModal" class="modal hidden">
@@ -534,7 +754,7 @@
     </label>
     <label id="rtCommandRow">Start command
       <input id="rtCommand" type="text" spellcheck="false" placeholder="npm run dev -- --port {port}">
-      <span class="mini">SiteSlurp runs this in the project folder, replaces <code>{port}</code> with a private
+      <span class="mini">Local Dev Studio runs this in the project folder, replaces <code>{port}</code> with a private
         port, and proxies its own port to it — so the address, live preview and Review Mode stay the same.</span>
     </label>
     <label id="rtPortRow">App port
@@ -611,10 +831,10 @@
 
 <div id="aboutModal" class="modal hidden">
   <div class="modal-card about">
-    <img class="mark big" src="slurp-logo.png" alt="" aria-hidden="true">
-    <h3>SiteSlurp Studio <span id="aboutVersion" class="mini"></span></h3>
-    <p class="modal-hint">Slurp any website into editable files, host it locally, manage every client site in one place.</p>
-    <p class="modal-hint mini">siteslurp.com</p>
+    <img class="mark big" src="nightshyft-mark.png" alt="" aria-hidden="true">
+    <h3>Local Dev Studio <span id="aboutVersion" class="mini"></span></h3>
+    <p class="modal-hint">Capture any website into editable files, host it locally, manage every client site in one place, and present it on the big screen.</p>
+    <p class="modal-hint mini">Local Developer Studio · by NightShyft · localdevstudio.com</p>
     <dl id="aboutDetails" class="about-details"></dl>
     <div class="modal-actions">
       <button id="aboutNotices" class="small">Licenses</button>
@@ -624,6 +844,13 @@
 </div>
 
 <div class="drop-hint" aria-hidden="true"><div class="drop-hint-card">Drop a folder to add it to the library</div></div>
+
+<!-- Until the first folder comes in, say how: dropping is the one way in with no button. -->
+<div id="dropTip" class="drop-tip hidden" role="status">
+  <svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg>
+  <span>Drag and Drop website folders directly into the app</span>
+  <button id="dropTipClose" class="toast-close" title="Dismiss" aria-label="Dismiss">×</button>
+</div>
 
 <div id="toasts" aria-live="polite"></div>
 

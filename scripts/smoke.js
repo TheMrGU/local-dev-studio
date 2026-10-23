@@ -1,10 +1,10 @@
-/* Launch SiteSlurp, screenshot the UI, make sure it actually rendered.
+/* Launch Local Dev Studio, screenshot the UI, make sure it actually rendered.
  * With --capture, it also drives the capture form for real and waits for the result,
  * which exercises renderer -> ipc -> browser -> extract -> thumbnail end to end.
  *
  *   npm run smoke                                        # dev build, UI only
- *   node scripts/smoke.js "dist\win-unpacked\SiteSlurp Studio.exe" --capture
- *   node scripts/smoke.js "dist\win-unpacked\SiteSlurp Studio.exe" --capture https://site.com
+ *   node scripts/smoke.js "dist\win-unpacked\Local Dev Studio.exe" --capture
+ *   node scripts/smoke.js "dist\win-unpacked\Local Dev Studio.exe" --capture https://site.com
  */
 'use strict';
 const fs = require('fs');

@@ -1,4 +1,4 @@
-/* Plain-node checks for the parts of SiteSlurp that don't need a window.
+/* Plain-node checks for the parts of Local Dev Studio that don't need a window.
  * Run with: npm test
  */
 'use strict';
@@ -61,7 +61,8 @@ const calibrationStore = require('../lib/calibration');
 const { exportReview, styleLine, renderAnnotation, renderReviewMd } = require('../lib/reviewExport');
 const { ReviewManager } = require('../lib/review');
 const { fixModels } = require('../lib/modelfix');
-const { mirrorSite, parseCookiesFile, localSegments, siteOrigins, builtByScripts, absolutizeDocument, documentReferences } = require('../lib/mirror');
+const { mirrorSite, parseCookiesFile, localSegments, siteOrigins, builtByScripts, absolutizeDocument, documentReferences,
+  routeShape, rootReferences, TYPES_FILE } = require('../lib/mirror');
 const { GrabManager, localPathFor } = require('../lib/grab');
 const { MenuManager } = require('../lib/menu');
 const { locateSource } = require('../lib/sourceline');
@@ -255,6 +256,45 @@ async function extractTests() {
     ok(css.includes('../assets/images/'), 'css points up one level: ' + css);
   });
 
+  await check('leaves a data URI inside a custom property inline', async () => {
+    // url() reached through var() resolves against the stylesheet using it,
+    // so a file path written into `--icon:url(…)` would 404 under css/.
+    const src = scratch('ex-customprop');
+    const svg = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M0 0h24v24H0z"/></svg>');
+    fs.writeFileSync(path.join(src, 'a.html'),
+      `<span style="--icon:url(${svg})"></span><span style="--bg: url('data:image/png;base64,${pngB64}')"></span><img src="data:image/png;base64,${pngB64}">`);
+    const out = path.join(TMP, 'ex-customprop-out');
+    const stats = await extractSite(src, out, {});
+    const html = fs.readFileSync(path.join(out, 'a.html'), 'utf8');
+    ok(html.includes(`--icon:url(${svg})`), 'svg custom property kept inline: ' + html);
+    ok(html.includes(`--bg: url('data:image/png;base64,${pngB64}')`), 'base64 custom property kept inline: ' + html);
+    ok(/<img src="assets\/images\/img-[0-9a-f]{10}\.png">/.test(html), 'an ordinary data URI still becomes a file: ' + html);
+    eq(stats.images, 1);
+  });
+
+  await check('makes the site’s own absolute links root-relative', async () => {
+    const src = scratch('ex-origin');
+    fs.writeFileSync(path.join(src, '_.html'), [
+      '<!DOCTYPE html> <html lang=en><!--\n Page saved with SingleFile \n url: https://www.site.test/ \n-->',
+      '<a href=https://site.test/shop>s</a><a href="https://www.site.test">h</a><a href="https://site.test?x=1">q</a>',
+      '<a href="https://site.test.evil.com/a">e</a><link rel=canonical href="http://site.test/store">',
+      '<script>self.__next_f.push([1,"\\"u\\":\\"https://site.test/media/a.webp\\""])</script>',
+    ].join(''));
+    const out = path.join(TMP, 'ex-origin-out');
+    await extractSite(src, out, { siteUrl: 'https://site.test/' });
+    const html = fs.readFileSync(path.join(out, '_.html'), 'utf8');
+    ok(html.includes('url: https://www.site.test/ '), 'header untouched: ' + html);
+    ok(html.includes('href=/shop>'), 'unquoted link: ' + html);
+    ok(html.includes('href="/"'), 'bare origin becomes the root: ' + html);
+    ok(html.includes('href="/?x=1"'), 'bare origin with a query: ' + html);
+    ok(html.includes('https://site.test.evil.com/a'), 'a longer host is not the site: ' + html);
+    ok(html.includes('href="/store"'), 'either scheme, www or not: ' + html);
+    ok(html.includes('\\"u\\":\\"/media/a.webp\\"'), 'inside an inlined payload too: ' + html);
+    const plain = path.join(TMP, 'ex-origin-plain');
+    await extractSite(src, plain, {});
+    ok(fs.readFileSync(path.join(plain, '_.html'), 'utf8').includes('href=https://site.test/shop>'), 'nothing changes without a site URL');
+  });
+
   await check('dedupes identical assets across pages', async () => {
     const src = scratch('ex-dedupe');
     for (const name of ['a.html', 'b.html']) {
@@ -394,6 +434,29 @@ async function modelfixTests() {
     eq(fs.readFileSync(path.join(dir, 'a.html'), 'utf8'), page);
   });
 
+  await check('keeps a JSON-escaped payload intact when rewriting a URL inside it', async () => {
+    // Next.js inlines its page data as `self.__next_f.push([1,"…\"image\":\"https://…png\"…"])`.
+    // Swallowing the `\` before the closing quote used to end the JS string
+    // early — a syntax error that took the whole app down at boot.
+    const server = http.createServer((req, res) => { res.writeHead(200); res.end('PNG'); });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const dir = scratch('mf-escaped');
+      const script = `self.__next_f.push([1,"3:{\\"image\\":\\"${origin}/files/a.png?v=1\\",\\"x\\":1}"])`;
+      fs.writeFileSync(path.join(dir, '_.html'),
+        `<!DOCTYPE html> <html lang=en class=x><!--\n Page saved with SingleFile \n url: https://site.test/ \n--><script>${script}</script>`);
+      const count = await fixModels(dir, 'https://site.test/', () => {});
+      eq(count, 1);
+      const html = fs.readFileSync(path.join(dir, '_.html'), 'utf8');
+      ok(html.includes('\\"image\\":\\"/assets/remote/127.0.0.1/files/a.png\\",\\"x\\"'), 'rewritten with the escape kept: ' + html);
+      const body = /<script>([\s\S]*?)<\/script>/.exec(html)[1];
+      new (require('vm').Script)(body); // still parses
+    } finally {
+      server.close();
+    }
+  });
+
   await check('treats the hosts the mirror saw the site answer on as the site itself', async () => {
     const server = http.createServer((req, res) => {
       if (req.url === '/models/a.glb') { res.writeHead(200); res.end('GLB'); } else { res.writeHead(404); res.end(); }
@@ -505,6 +568,88 @@ async function mirrorTests() {
     eq(stats.pages, 2);
     eq(stats.files, 2, 'only the chunks were new: ');
     eq(fs.readFileSync(path.join(dir, 'assets', 'images', 'hero.png'), 'utf8'), 'extracted-bytes');
+  });
+
+  await check('names route shapes and root-relative references', () => {
+    eq(routeShape('https://s.test/'), '/0');
+    eq(routeShape('https://s.test/shop?type=x'), 'shop/1');
+    eq(routeShape('https://s.test/Shop/a-b'), 'shop/2');
+    const text = '<script src="/_next/a.js"></script><img src="/i/x.png"><a href="/about">x</a>'
+      + '<script>p([1,"\\"img\\":\\"/media/p.webp\\""]);import("/c.mjs");u("//cdn.test/x.js");q("/__siteslurp__/x.js");r("/a/../b.css")</script>';
+    eq([...rootReferences(text)], ['/_next/a.js', '/i/x.png', '/media/p.webp', '/c.mjs', '/a/../b.css']);
+  });
+
+  await check('records one page of every route shape first, then sweeps what the rest still reference', async () => {
+    const served = { '/_next/c2.js': 'C2', '/media/p2.webp': 'P2' };
+    const server = http.createServer((req, res) => {
+      if (served[req.url]) { res.writeHead(200); res.end(served[req.url]); } else { res.writeHead(404); res.end(); }
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const dir = scratch('mirror-sweep');
+      const page = (u, body) => `<!DOCTYPE html> <html lang=en><!--\n Page saved with SingleFile \n url: ${u} \n-->${body}`;
+      fs.writeFileSync(path.join(dir, '_.html'), page(`${origin}/`, '<script src="/_next/c1.js"></script>'));
+      fs.writeFileSync(path.join(dir, '_shop.html'), page(`${origin}/shop?type=a`, '<p>a</p>'));
+      fs.writeFileSync(path.join(dir, '_shop (2).html'), page(`${origin}/shop?type=b`, '<p>b</p>'));
+      fs.writeFileSync(path.join(dir, '_shop (3).html'), page(`${origin}/shop`, '<p>plain</p>'));
+      fs.writeFileSync(path.join(dir, '_shop_p1.html'), page(`${origin}/shop/p1`, '<script src="/_next/c2.js"></script>'));
+      fs.writeFileSync(path.join(dir, '_shop_p2.html'), page(`${origin}/shop/p2`, '<script>self.__next_f.push([1,"\\"img\\":\\"/media/p2.webp\\""])</script><a href="/nope.js">x</a>'));
+      const seen = [];
+      const stats = await mirrorSite(dir, origin + '/', {
+        entry: '_.html',
+        record: async (pageUrl, { sink }) => {
+          seen.push(pageUrl);
+          if (pageUrl === origin + '/') sink({ url: origin + '/_next/c1.js', mime: 'text/javascript', status: 200, body: Buffer.from('c1') });
+          return { requests: 1, failed: [] };
+        },
+      }, () => {});
+      eq(seen.slice(0, 3), [origin + '/', origin + '/shop', origin + '/shop/p1'], 'one of each shape first, the plainest of each: ');
+      eq(stats.pages, 6, 'a small site still records every page: ');
+      eq(fs.readFileSync(path.join(dir, '_next', 'c1.js'), 'utf8'), 'c1');
+      eq(fs.readFileSync(path.join(dir, '_next', 'c2.js'), 'utf8'), 'C2', 'a chunk the recorder never saw was fetched: ');
+      eq(fs.readFileSync(path.join(dir, 'media', 'p2.webp'), 'utf8'), 'P2', 'an image named in an escaped payload was fetched: ');
+      eq(stats.failed, 1, '/nope.js was tried once: ');
+      ok(!fs.existsSync(path.join(dir, 'nope.js')), 'a 404 leaves nothing behind');
+    } finally {
+      server.close();
+    }
+  });
+
+  await check('remembers the type of an extensionless file so the server can run it', async () => {
+    const dir = scratch('mirror-types');
+    fs.writeFileSync(path.join(dir, '_.html'), '<!--\n url: https://site.test/ \n--><script src="https://cdn.test/embed/api/v1"></script>');
+    await mirrorSite(dir, 'https://site.test/', {
+      record: async (pageUrl, { sink }) => {
+        sink({ url: 'https://cdn.test/embed/api/v1', mime: 'text/javascript; charset=utf-8', status: 200, body: Buffer.from('js!') });
+        sink({ url: 'https://cdn.test/lib/x.js', mime: 'text/javascript', status: 200, body: Buffer.from('x') });
+        // A router's prefetch of another route is a page, not a file.
+        sink({ url: 'https://site.test/shop?_rsc=1', mime: 'text/x-component', status: 200, body: Buffer.from('0:[]') });
+        sink({ url: 'https://site.test/about', mime: 'text/html; charset=utf-8', status: 200, body: Buffer.from('<p>') });
+        return { requests: 4, failed: [] };
+      },
+    }, () => {});
+    const types = JSON.parse(fs.readFileSync(path.join(dir, TYPES_FILE), 'utf8'));
+    eq(types, { 'assets/remote/cdn.test/embed/api/v1': 'text/javascript' }, 'only the extensionless file is listed: ');
+    ok(!fs.existsSync(path.join(dir, 'shop')) && !fs.existsSync(path.join(dir, 'about')), 'page payloads never become files');
+    ok(fs.readFileSync(path.join(dir, '_.html'), 'utf8').includes('src="/assets/remote/cdn.test/embed/api/v1"'), 'reference rewritten');
+    const server = http.createServer(makeHandler(dir));
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const get = p => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port: server.address().port, path: p }, r => {
+        let body = '';
+        r.on('data', c => { body += c; });
+        r.on('end', () => resolve({ status: r.statusCode, type: r.headers['content-type'], body }));
+      }).on('error', reject);
+    });
+    try {
+      const res = await get('/assets/remote/cdn.test/embed/api/v1');
+      eq(res.type, 'text/javascript');
+      eq(res.body, 'js!');
+      eq((await get(`/${TYPES_FILE}`)).status, 404, 'the types file itself is never served: ');
+    } finally {
+      server.close();
+    }
   });
 
   await check('falls back to a plain download when the browser dropped a body', async () => {
@@ -996,6 +1141,51 @@ async function projectTests() {
     eq(projectsReg.byId(pa.id).deploy.at, null, 'no push time means none: ');
     projectsReg.update(pa.id, { deploy: null });
     eq(projectsReg.byId(pa.id).deploy, null);
+  });
+
+  await check('a fresh library starts with the three default sections', () => {
+    eq(projectsReg.sections().map(s => s.name), ['Client Websites', 'Concepts', 'Personal & Business']);
+    eq(projectsReg.byPath(a).section, null, 'a new project is unsorted: ');
+  });
+
+  await check('files a project into a section and back out', async () => {
+    const pa = projectsReg.byPath(a);
+    projectsReg.update(pa.id, { section: 'sec_clients' });
+    eq(projectsReg.byId(pa.id).section, 'sec_clients');
+    projectsReg.update(pa.id, { section: null });
+    eq(projectsReg.byId(pa.id).section, null);
+    await throws(() => projectsReg.update(pa.id, { section: 'sec_nope' }), 'unknown section');
+    eq(projectsReg.byId(pa.id).section, null, 'a refused move changes nothing: ');
+  });
+
+  await check('creates, renames and reorders sections; refuses blanks and twins', async () => {
+    const archive = projectsReg.addSection('  Old   work ');
+    eq(archive.name, 'Old work', 'whitespace tidied: ');
+    await throws(() => projectsReg.addSection('   '), 'blank name');
+    await throws(() => projectsReg.addSection('concepts'), 'same name, different case');
+    await throws(() => projectsReg.addSection('x'.repeat(41)), 'too long');
+    eq(projectsReg.renameSection(archive.id, 'Archive').name, 'Archive');
+    await throws(() => projectsReg.renameSection(archive.id, 'Concepts'), 'rename onto another name');
+    eq(projectsReg.renameSection(archive.id, 'ARCHIVE').name, 'ARCHIVE', 'recasing its own name is fine: ');
+    projectsReg.moveSection(archive.id, -1);
+    eq(projectsReg.sections().map(s => s.id).indexOf(archive.id), 2, 'moved one earlier: ');
+    projectsReg.moveSection('sec_clients', -1);
+    eq(projectsReg.sections()[0].id, 'sec_clients', 'the first stays first: ');
+  });
+
+  await check('deleting a section unsorts its projects, and sections survive a reload', () => {
+    const pa = projectsReg.byPath(a);
+    const archive = projectsReg.sections().find(s => s.name === 'ARCHIVE');
+    projectsReg.update(pa.id, { section: archive.id });
+    projectsReg.update(projectsReg.byPath(c).id, { section: 'sec_concepts' });
+    eq(projectsReg.removeSection(archive.id), 1, 'one project was in it: ');
+    eq(projectsReg.byId(pa.id).section, null);
+    ok(!projectsReg.sections().some(s => s.id === archive.id), 'section gone');
+    delete require.cache[require.resolve('../lib/projects')];
+    const fresh = require('../lib/projects');
+    eq(fresh.sections().map(s => s.id), ['sec_clients', 'sec_concepts', 'sec_personal']);
+    eq(fresh.byPath(c).section, 'sec_concepts', 'filing kept across a restart: ');
+    projectsReg.update(projectsReg.byPath(c).id, { section: null });
   });
 
   await check('refuses junk folders with a sentence, not a crash', async () => {
@@ -2231,7 +2421,7 @@ async function menuTests() {
   let auditOn = false;
   const manager = new MenuManager({
     clientPath: path.join(ROOT, 'renderer', 'slurp-menu.js'),
-    logoPath: path.join(ROOT, 'renderer', 'slurp-logo.png'),
+    logoPath: path.join(ROOT, 'renderer', 'nightshyft-mark.png'),
     siteFor: dir => ({
       name: 'menu-site', auditAvailable: dir === site, auditActive: auditOn,
       reason: dir === site ? null : 'not a project',
@@ -2378,6 +2568,13 @@ async function miscTests() {
     eq(saved.autoSnapshotIdleSec, 10);
   });
 
+  await check('keeps library section view state tidy', () => {
+    const saved = settings.save({ libSection: '', collapsedSections: ['sec_clients', 3, null, '_captures'] });
+    eq(saved.libSection, 'all');
+    eq(saved.collapsedSections, ['sec_clients', '_captures']);
+    eq(settings.save({ collapsedSections: 'nope' }).collapsedSections, []);
+  });
+
   await check('survives a corrupt settings file', () => {
     const file = path.join(TMP, 'userData', 'settings.json');
     fs.writeFileSync(file, '{ not json');
@@ -2495,7 +2692,7 @@ async function runtimeTests() {
   });
 
   // The whole point: a project that only exists once a process runs still gets
-  // hosted on its own stable SiteSlurp port, with the process supervised.
+  // hosted on its own stable Local Dev Studio port, with the process supervised.
   await check('hosts a command project through the proxy, then kills it on stop', async () => {
     const dir = scratch('rt-live');
     write(dir, 'server.js', `
@@ -3275,7 +3472,7 @@ async function agentTests() {
       const mcp = session({ SLURP_USERDATA: mcpDir });
       try {
         const init = await mcp.call('initialize', { protocolVersion: '2025-06-18', capabilities: {} });
-        eq(init.result.serverInfo.name, 'siteslurp');
+        eq(init.result.serverInfo.name, 'local-dev-studio');
         eq(init.result.serverInfo.version, '9.9.9-test');
         mcp.notify('notifications/initialized');
         const tools = await mcp.call('tools/list', {});
@@ -3287,9 +3484,9 @@ async function agentTests() {
         ok(!listed.result.isError, 'call succeeded');
         ok(listed.result.content[0].text.includes(project.name), 'project name in the payload');
         const resources = await mcp.call('resources/list', {});
-        ok(resources.result.resources.some(r => r.uri === 'siteslurp://calibration.md'), 'calibration resource');
+        ok(resources.result.resources.some(r => r.uri === 'localdevstudio://calibration.md'), 'calibration resource');
         ok(resources.result.resources.some(r => r.uri.endsWith(`${project.id}/REVIEW.md`)), 'per-project review resource');
-        const review = await mcp.call('resources/read', { uri: `siteslurp://projects/${project.id}/REVIEW.md` });
+        const review = await mcp.call('resources/read', { uri: `localdevstudio://projects/${project.id}/REVIEW.md` });
         ok(review.result.contents[0].text.includes('Resolved this review'), 'resource text is the live REVIEW.md');
         const unknown = await mcp.call('no/such/method', {});
         eq(unknown.error.code, -32601, 'unknown methods answer -32601: ');
@@ -3864,8 +4061,289 @@ async function sharingPowerTests() {
 }
 
 /* ---------------- run ---------------- */
+/* ---------------- ShowCase ---------------- */
+// The director's pure half: options in range, which links a tour walks, what
+// happens when a page ends, and where a device frame puts the view.
+async function showcaseTests() {
+  console.log('\nShowCase');
+  const sc = require('../lib/showcase');
+
+  await check('options: defaults, clamps, enums and the old mode names', () => {
+    const d = sc.normalizeOptions();
+    eq(d.style, 'walkthrough'); eq(d.speed, 90); eq(d.frame, 'none'); eq(d.cursor, 'ghost'); eq(d.display, null);
+    eq(d.nav, true); eq(d.flip, false); eq(d.record, false); eq(d.music, ''); eq(d.musicVolume, 60);
+    const o = sc.normalizeOptions({ speed: 9999, dwell: -4, zoom: '125', style: 'reel', frame: 'toaster', cursor: 'spotlight',
+      tagline: 'x'.repeat(500), display: '3', sections: 0, bogus: true, record: 1, musicVolume: 500, music: 'C:\\x\\y.mp3' });
+    eq(o.speed, 800); eq(o.dwell, 0); eq(o.zoom, 125); eq(o.style, 'reel'); eq(o.frame, 'none');
+    eq(o.cursor, 'spotlight'); eq(o.tagline.length, 160); eq(o.display, 3); eq(o.sections, false);
+    eq(o.record, true); eq(o.musicVolume, 100); eq(o.music, 'C:\\x\\y.mp3');
+    ok(!('bogus' in o), 'unknown keys dropped');
+    eq(sc.normalizeOptions({ display: 'nope' }).display, null);
+    eq(sc.normalizeOptions('junk').style, 'walkthrough');
+    eq(sc.normalizeOptions({ frame: 'duo' }).frame, 'duo');
+    // 2.7.0 saved "mode"; it still reads.
+    eq(sc.normalizeOptions({ mode: 'tour' }).style, 'walkthrough');
+    eq(sc.normalizeOptions({ mode: 'still' }).style, 'still');
+    eq(sc.normalizeOptions({ mode: 'tour', style: 'reel' }).style, 'reel', 'style wins over mode: ');
+    for (const style of sc.STYLES) ok(sc.STYLE_SPEC[style] && sc.STYLE_BEATS[style], `${style} has a spec and beats`);
+  });
+
+  await check('nav targets: same origin, no files, no anchors, nav first, deduped, capped', () => {
+    const origin = 'http://localhost:4300';
+    const links = [
+      { href: '/#top', text: 'Top', inNav: true },
+      { href: 'http://localhost:4300/', text: 'Home', inNav: true },
+      { href: '/about.html', text: '  About\n us ', inNav: true },
+      { href: '/about.html?x=1', text: 'About again', inNav: false },
+      { href: '/about.html', text: 'dupe', inNav: true },
+      { href: '/brochure.pdf', text: 'PDF', inNav: true },
+      { href: 'https://twitter.com/x', text: 'Twitter', inNav: true },
+      { href: 'mailto:hi@x.com', text: 'Mail' },
+      { href: '/blog/post-one', text: '', inNav: false },
+      { href: '/contact/', text: 'Contact', inNav: true },
+      { href: 'http://localhost:4300/pricing#plans', text: 'Pricing', inNav: false },
+      null, { nope: 1 },
+    ];
+    const out = sc.filterNavTargets(links, { origin, current: origin + '/' });
+    eq(out.map(t => t.label), ['About us', 'Contact', 'About again', 'post one', 'Pricing']);
+    eq(out[0].href, 'http://localhost:4300/about.html');
+    eq(out[1].href, 'http://localhost:4300/contact/');
+    eq(out[4].href, 'http://localhost:4300/pricing', 'hash stripped');
+    eq(sc.filterNavTargets(links, { origin, current: origin + '/', max: 2 }).length, 2);
+    eq(sc.filterNavTargets(links, { origin: 'not a url' }), []);
+    // From /about.html the home link is a real page again.
+    const fromAbout = sc.filterNavTargets(links, { origin, current: origin + '/about.html' });
+    ok(fromAbout.some(t => t.href === origin + '/'), 'home is a target from another page');
+    ok(!fromAbout.some(t => t.href.endsWith('/about.html')), 'the current page is not');
+  });
+
+  await check('nav targets: a capture\'s links to its source site count as local', () => {
+    const origin = 'http://localhost:4300';
+    const links = [
+      { href: 'https://motionsites.ai/', text: 'Home', inNav: true },
+      { href: 'https://motionsites.ai/unlimited', text: 'Unlimited', inNav: true },
+      { href: 'https://motionsites.ai/backgrounds?ref=1#top', text: 'Backgrounds' },
+      { href: 'https://motionsites.ai/#features', text: 'Features', inNav: true },
+      { href: 'https://designrocket.io/', text: 'Elsewhere', inNav: true },
+    ];
+    const out = sc.filterNavTargets(links, { origin, current: origin + '/', sourceOrigin: 'https://motionsites.ai' });
+    eq(out.map(t => t.href), ['http://localhost:4300/unlimited', 'http://localhost:4300/backgrounds?ref=1']);
+    eq(out[0].original, 'https://motionsites.ai/unlimited', 'the original link is kept for finding it on the page: ');
+    eq(sc.filterNavTargets(links, { origin, current: origin + '/' }), [], 'without a source origin they are foreign: ');
+    eq(sc.filterNavTargets(links, { origin, current: origin + '/', sourceOrigin: 'garbage' }), [], 'a bad source origin is ignored: ');
+  });
+
+  await check('hosting: a pretty path redirects to the flat page SingleFile saved', async () => {
+    const site = scratch('flat-site');
+    fs.writeFileSync(path.join(site, '_.html'), '<html><body>home</body></html>');
+    fs.writeFileSync(path.join(site, '_about.html'), '<html><body>about</body></html>');
+    fs.writeFileSync(path.join(site, '_en_projects_x.html'), '<html><body>x</body></html>');
+    const mgr = new HostManager();
+    const port = await mgr.start(site, 4791);
+    const head = p => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: p }, r => { r.resume(); resolve({ status: r.statusCode, location: r.headers.location }); }).on('error', reject);
+    });
+    try {
+      eq(await head('/about'), { status: 302, location: '/_about.html' });
+      eq(await head('/en/projects/x/'), { status: 302, location: '/_en_projects_x.html' });
+      eq((await head('/about?utm=1')).status, 302);
+      eq((await head('/_about.html')).status, 200, 'the flat name itself serves: ');
+      eq((await head('/nothing-here')).status, 404);
+      eq((await head('/about.css')).status, 404, 'a file-looking path is not a page: ');
+    } finally { mgr.stopAll(); }
+  });
+
+  await check('hosting: a query string picks the captured page saved from that URL', async () => {
+    // The crawler reached /shop?type=jerseys before /shop, so SingleFile named
+    // the filtered page _shop.html and the plain one _shop (3).html.
+    const site = scratch('query-site');
+    const page = u => `<!DOCTYPE html> <html lang=en><!--\n Page saved with SingleFile \n url: ${u} \n--><p>x</p>`;
+    fs.writeFileSync(path.join(site, '_.html'), page('https://site.test/'));
+    fs.writeFileSync(path.join(site, '_shop.html'), page('https://site.test/shop?type=jerseys'));
+    fs.writeFileSync(path.join(site, '_shop (2).html'), page('https://site.test/shop?type=hats'));
+    fs.writeFileSync(path.join(site, '_shop (3).html'), page('https://site.test/shop'));
+    fs.writeFileSync(path.join(site, '_about.html'), '<html><body>no header</body></html>');
+    const mgr = new HostManager();
+    const port = await mgr.start(site, 4793);
+    const head = (p, headers = {}) => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: p, headers }, r => {
+        r.resume();
+        resolve(r.headers.location ? { status: r.statusCode, location: r.headers.location } : { status: r.statusCode });
+      }).on('error', reject);
+    });
+    try {
+      eq(await head('/shop'), { status: 302, location: '/_shop%20(3).html' }, 'the plain page, not the first-crawled filter: ');
+      eq(await head('/shop/'), { status: 302, location: '/_shop%20(3).html' });
+      eq(await head('/shop?type=hats'), { status: 302, location: '/_shop%20(2).html' });
+      eq(await head('/shop?type=jerseys'), { status: 302, location: '/_shop.html' });
+      eq(await head('/shop?type=unknown&_rsc=1'), { status: 302, location: '/_shop%20(3).html' }, 'an unknown query falls back to the path: ');
+      eq(await head('/about'), { status: 302, location: '/_about.html' }, 'a page without a header still resolves by name: ');
+      eq((await head('/_shop%20(2).html')).status, 200);
+      // The mirror files a product page's runtime assets under shop/, and a
+      // router prefetch payload may have landed as a file named like a route.
+      fs.mkdirSync(path.join(site, 'shop', 'hat'), { recursive: true });
+      fs.writeFileSync(path.join(site, 'shop', 'hat', 'x.js'), 'js');
+      fs.writeFileSync(path.join(site, 'shop', 'hat-payload'), 'rsc');
+      fs.writeFileSync(path.join(site, '_shop_hat-payload.html'), page('https://site.test/shop/hat-payload'));
+      eq(await head('/shop'), { status: 302, location: '/_shop%20(3).html' }, 'a folder of runtime files does not shadow the page: ');
+      eq(await head('/shop/hat/'), { status: 404 }, 'a folder with no index and no page is nothing: ');
+      eq(await head('/shop/hat/x.js'), { status: 200 });
+      eq(await head('/shop/hat-payload', { accept: 'text/html,*/*' }), { status: 302, location: '/_shop_hat-payload.html' }, 'a navigation goes to the page, not the payload file: ');
+      eq((await head('/shop/hat-payload', { accept: '*/*' })).status, 200, 'a fetch of the file itself still gets it: ');
+    } finally { mgr.stopAll(); }
+  });
+
+  // A reading of a typical landing page, as the client would report it.
+  const reading = () => ({
+    scrolls: true, max: 6000, vh: 900,
+    sections: [
+      { y: 900, label: 'Services', key: 10, cards: [11, 12, 13, 14] },
+      { y: 1800, label: 'The Build', key: null, cards: [] },
+      { y: 2700, label: '', key: 15, cards: [16, 17] },
+      { y: 3600, label: 'Reviews', key: 18, cards: [19, 20, 21] },
+      { y: 4500, label: 'Book', key: null, cards: [] },
+    ],
+    nav: [{ ref: 1, label: 'Services' }, { ref: 2, label: 'Gallery' }, { ref: 3, label: 'Reviews' }],
+    buttons: [{ ref: 4, label: 'Book Now' }, { ref: 5, label: 'Explore' }],
+    hero: 9,
+    interactive: [{ ref: 30, label: 'Tag one' }, { ref: 31, label: 'Tag two' }],
+  });
+  const kinds = board => board.map(s => s.kind).join(' ');
+
+  await check('storyboard: a walkthrough opens, walks the nav, hovers the button, then every section with its picture and cards', () => {
+    const board = sc.buildBoard(reading(), { style: 'walkthrough' });
+    eq(kinds(board), 'establish nav button glide detail cards glide glide detail glide detail cards glide glide hold');
+    eq(board[0].ms, 3000);
+    eq(board[1].refs, [1, 2, 3]); eq(board[1].labels, ['Services', 'Gallery', 'Reviews']);
+    eq(board[2].ref, 4); eq(board[2].label, 'Button · Book Now');
+    eq(board[3], { kind: 'glide', label: 'Section · Services', y: 900, caption: 'Services', ms: 2500, boost: 1 });
+    eq(board[4].ref, 10); eq(board[4].push, 1.1); eq(board[4].ms, 2000);
+    eq(board[5].refs, [11, 12, 13, 14]);
+    eq(board[7].label, 'Section', 'a section without a heading still gets a stop: ');
+    eq(board[7].caption, '');
+    eq(board[board.length - 2], { kind: 'glide', label: 'To the end', y: 6000, caption: '', ms: 0, boost: 1 });
+    eq(board[board.length - 1], { kind: 'hold', label: 'End of page', ms: 4000 });
+    // Two cards are not a grid.
+    ok(!board.some(s => s.kind === 'cards' && s.refs.length < 3), 'no sweep over fewer than three cards');
+  });
+
+  await check('storyboard: beats are switches; flip depends on the frame', () => {
+    const quiet = sc.buildBoard(reading(), { style: 'walkthrough', nav: false, buttons: false, details: false, cards: false });
+    eq(kinds(quiet), 'establish glide glide glide glide glide glide hold');
+    const flipped = sc.buildBoard(reading(), { style: 'walkthrough', flip: true, frame: 'laptop' });
+    eq(flipped[flipped.length - 2].kind, 'flip');
+    eq(sc.buildBoard(reading(), { style: 'walkthrough', flip: true, frame: 'phone' }).some(s => s.kind === 'flip'), false, 'no flip on a phone: ');
+    eq(sc.buildBoard(reading(), { style: 'walkthrough', flip: true }, { frame: 'duo' }).some(s => s.kind === 'flip'), false, 'no flip in a duo: ');
+    const noStops = sc.buildBoard(reading(), { style: 'walkthrough', sections: false });
+    eq(kinds(noStops), 'establish nav button glide hold');
+    const oneNav = sc.buildBoard({ ...reading(), nav: [{ ref: 1, label: 'Only' }] }, { style: 'walkthrough' });
+    ok(!oneNav.some(s => s.kind === 'nav'), 'a single nav link is not a walk');
+  });
+
+  await check('storyboard: a reel keeps three stops and hurries; cinematic opens on the hero; scroll just scrolls; still holds', () => {
+    const reel = sc.buildBoard(reading(), { style: 'reel', ...sc.STYLE_BEATS.reel, frame: 'laptop' });
+    eq(kinds(reel), 'establish glide detail glide detail glide glide flip hold');
+    eq(reel[0].ms, 1800);
+    eq(reel.filter(s => s.kind === 'glide').map(s => s.y), [900, 2700, 4500, 6000], 'spread down the page: ');
+    eq(reel[1].boost, 1.8);
+    const cine = sc.buildBoard(reading(), { style: 'cinematic', ...sc.STYLE_BEATS.cinematic });
+    eq(kinds(cine).slice(0, 16), 'establish detail');
+    eq(cine[1], { kind: 'detail', label: 'Hero', ref: 9, push: 1.16, ms: 2500 });
+    eq(cine[0].ms, 4500);
+    ok(!cine.some(s => s.kind === 'nav' || s.kind === 'cards'), 'cinematic keeps the pointer out of it');
+    const scroll = sc.buildBoard(reading(), { style: 'scroll', ...sc.STYLE_BEATS.scroll, details: true });
+    eq(kinds(scroll), 'establish glide glide glide glide glide glide hold', 'scroll never pushes in even with details on: ');
+    eq(sc.buildBoard(reading(), { style: 'still', pageDwell: 6 }), [{ kind: 'hold', label: 'Hold', ms: 6000 }]);
+  });
+
+  await check('storyboard: a page that does not scroll gets explored by pointer; an empty reading still plays', () => {
+    const flat = sc.buildBoard({ ...reading(), scrolls: false, max: 0 }, { style: 'walkthrough' });
+    eq(kinds(flat), 'establish nav button wander hold');
+    eq(flat[3].refs, [30, 31]); eq(flat[3].labels, ['Tag one', 'Tag two']);
+    eq(kinds(sc.buildBoard({ scrolls: false, interactive: [] }, { style: 'walkthrough' })), 'establish hold');
+    eq(kinds(sc.buildBoard(null, {})), 'establish hold');
+    eq(kinds(sc.buildBoard({ scrolls: true, max: 3000, sections: [{ y: 'x' }, null, { y: 1200, label: 'Ok' }], nav: 'nope', buttons: [{}] }, { style: 'walkthrough' })), 'establish glide glide hold', 'junk in the reading is skipped: ');
+  });
+
+  await check('next step: pages walk pages, reels walk sites, loop wraps, otherwise ends', () => {
+    const step = o => sc.nextStep(o).type;
+    eq(step({ pages: false, loop: true }), 'restart');
+    eq(step({ pages: false, loop: false }), 'end');
+    eq(step({ pages: true, loop: true, pageCount: 3, pageIndex: 0 }), 'nextPage');
+    eq(step({ pages: true, loop: true, pageCount: 3, pageIndex: 2 }), 'firstPage');
+    eq(step({ pages: true, loop: false, pageCount: 3, pageIndex: 2 }), 'end');
+    eq(step({ pages: true, loop: true, pageCount: 1, pageIndex: 0 }), 'restart');
+    eq(step({ pages: false, loop: true, siteCount: 3, siteIndex: 0 }), 'nextSite');
+    eq(step({ pages: false, loop: true, siteCount: 3, siteIndex: 2 }), 'firstSite');
+    eq(step({ pages: false, loop: false, siteCount: 3, siteIndex: 2 }), 'end');
+    eq(step({ pages: true, loop: true, pageCount: 4, pageIndex: 1, siteCount: 2, siteIndex: 0 }), 'nextPage');
+    eq(step({ pages: true, loop: true, pageCount: 4, pageIndex: 3, siteCount: 2, siteIndex: 0 }), 'nextSite');
+    // The reel timer outranks the page order.
+    eq(step({ pages: true, loop: true, pageCount: 4, pageIndex: 1, siteCount: 2, siteIndex: 0, reelDue: true }), 'nextSite');
+    eq(step({ pages: true, loop: false, pageCount: 4, pageIndex: 1, siteCount: 2, siteIndex: 1, reelDue: true }), 'end');
+    eq(step({ pages: true, loop: true, pageCount: 4, pageIndex: 1, siteCount: 1, siteIndex: 0, reelDue: true }), 'nextPage', 'a single site has no reel: ');
+  });
+
+  await check('device fit: centred, scaled to fit, full stage for none, laptop and phone side by side for duo', () => {
+    const stage = { x: 0, y: 0, width: 1920, height: 1080 };
+    eq(sc.fitDevice('none', stage), { kind: 'none', x: 0, y: 0, width: 1920, height: 1080, scale: 1 });
+    const phone = sc.fitDevice('phone', stage);
+    eq(phone.kind, 'phone');
+    ok(phone.height <= 1080 * 0.86 + 1 && phone.height > 900, 'phone fills the height with breathing room: ' + phone.height);
+    ok(Math.abs((phone.width / phone.height) - (390 / 844)) < 0.01, 'phone keeps its aspect');
+    ok(Math.abs(phone.x + phone.width / 2 - 960) <= 1, 'phone centred');
+    ok(Math.abs(phone.scale - phone.width / 390) < 0.01, 'scale matches the CSS width');
+    const laptop = sc.fitDevice('laptop', stage);
+    ok(laptop.width <= 1920 * 0.8 + 1, 'laptop fits the width');
+    ok(laptop.y + laptop.height / 2 < 540, 'laptop rides above centre for its base');
+    const duo = sc.fitDevice('duo', stage);
+    eq(duo.kind, 'duo');
+    ok(duo.phone && duo.phone.kind === 'phone', 'duo carries a phone box');
+    ok(duo.x + duo.width <= 1920 * 0.7 + 1, 'the laptop stays in the left 70%: ' + (duo.x + duo.width));
+    ok(duo.phone.x >= duo.x + duo.width, 'the phone sits to the right of the laptop');
+    ok(duo.phone.x + duo.phone.width <= 1920, 'the phone stays on the stage');
+    ok(Math.abs(duo.width / duo.height - 1440 / 900) < 0.01, 'the laptop half keeps its aspect');
+    const tiny = sc.fitDevice('tablet', { x: 10, y: 10, width: 200, height: 100 });
+    eq(tiny.scale, 0.25, 'never shrinks below a quarter: ');
+    const huge = sc.fitDevice('phone', { width: 20000, height: 20000 });
+    eq(huge.scale, 4, 'never blows up past 4x: ');
+    eq(sc.fitDevice('phone', null).kind, 'phone', 'survives a missing stage: ');
+  });
+
+  await check('push-in: the box grows around the focus, which stays put', () => {
+    const box = { kind: 'none', x: 100, y: 50, width: 1000, height: 600, scale: 1 };
+    eq(sc.pushBox(box, { x: 500, y: 300 }, 1.2), { kind: 'none', x: 0, y: -10, width: 1200, height: 720, scale: 1.2 });
+    const corner = sc.pushBox(box, { x: 0, y: 0 }, 1.5);
+    eq([corner.x, corner.y], [100, 50], 'a top-left focus grows right and down: ');
+    const clamped = sc.pushBox(box, { x: 5000, y: -20 }, 1.1);
+    eq([clamped.x, clamped.y], [0, 50], 'focus is clamped to the box: ');
+    eq(sc.pushBox(box, null, 1), box, 'k = 1 is the box itself: ');
+  });
+
+  await check('recording name: site, moment, format', () => {
+    const when = new Date(2026, 8, 23, 14, 5);
+    eq(sc.recordingName(['Motion Sites!'], 'video/mp4;codecs=avc1', when), 'motion-sites-20260923-1405.mp4');
+    eq(sc.recordingName(['A', 'B'], 'video/mp4', when), 'reel-20260923-1405.mp4');
+    eq(sc.recordingName(['x'], 'video/webm;codecs=vp9', when), 'x-20260923-1405.webm');
+    eq(sc.recordingName([], '', when), 'reel-20260923-1405.webm');
+    eq(sc.recordingName(['!!!'], 'video/mp4', when), 'show-20260923-1405.mp4', 'a name with nothing usable: ');
+  });
+
+  await check('idle state and the client script exist', () => {
+    eq(sc.idleState(), { active: false });
+    const src = fs.readFileSync(sc.clientPath, 'utf8');
+    ok(src.includes('window.__nsShowcase'), 'client exposes its API');
+    ok(src.includes('data-slurp-ui'), 'client marks its chrome so other in-page tools skip it');
+    for (const fn of ['configure', 'begin', 'prepare', 'analyze', 'state', 'glideTo', 'hold', 'pointFor', 'abort', 'follow',
+      'navTargets', 'targetFor', 'cursorTo', 'cursorAway', 'restart', 'caption']) {
+      ok(new RegExp('\\b' + fn + '\\b').test(src), 'client has ' + fn);
+    }
+    ok(/data-ns-reveal/.test(src) && /data-ns-hide/.test(src), 'client reveals and tidies through marked attributes');
+  });
+}
+
 (async () => {
-  console.log(`SiteSlurp checks  (scratch: ${TMP})`);
+  console.log(`Local Dev Studio checks  (scratch: ${TMP})`);
   await paletteTests();
   await extractTests();
   await modelfixTests();
@@ -3894,6 +4372,7 @@ async function sharingPowerTests() {
   await sharingPowerTests();
   await grabTests();
   await menuTests();
+  await showcaseTests();
   await miscTests();
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

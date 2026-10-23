@@ -1,4 +1,4 @@
-/* SiteSlurp Studio — black, white and gray.
+/* Local Dev Studio — black, white and gray.
    The whole interface is one neutral ramp. White is the only emphasis there
    is: it marks the single committing action on a surface, the current tab, a
    site that is live, and keyboard focus. Red appears in exactly one situation
@@ -172,10 +172,6 @@ kbd {
 }
 .topbar button, .topbar input, .topbar select, .topbar kbd { -webkit-app-region: no-drag; }
 
-.brand { display: flex; align-items: center; gap: 9px; }
-.brand .mark { width: 22px; height: 22px; border-radius: 7px; flex: none; }
-.brand h1 { font-size: 14.5px; font-weight: 650; letter-spacing: -.03em; white-space: nowrap; }
-
 /* ---------- tabs ---------- */
 .tabs { display: flex; gap: 22px; align-self: stretch; }
 .tab {
@@ -215,6 +211,20 @@ kbd {
   padding: 1px 7px;
 }
 .tab.on .tab-count { color: var(--gray); }
+/* ShowCase is still in beta: an outlined label, quieter than the count pill. */
+.tab .tab-beta {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--dim);
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 16px;
+}
+.tab.on .tab-beta { color: var(--gray); }
 /* White dot: a capture is running (Extractor) or something is hosted (Studio). */
 .tab .tick { display: none; }
 .tab.busy .tick { display: inline-block; animation: pulse 1.6s ease-in-out infinite; }
@@ -592,6 +602,89 @@ input[type="checkbox"] { accent-color: var(--white); width: 14px; height: 14px; 
 .card-actions { display: flex; align-items: center; gap: 2px; row-gap: 6px; margin-top: 12px; position: relative; flex-wrap: wrap; }
 .card-actions .host-btn { margin-right: auto; }
 .empty { color: var(--dim); text-align: center; padding: 60px 0; font-size: 13.5px; max-width: 46ch; margin: 0 auto; line-height: 1.6; }
+.card.dragging { opacity: .35; }
+
+/* ---------- library sections ---------- */
+/* One chip per shelf. The current one is outlined in white, the same rule as
+   the current tab; mid-drag, the chip under the card lights up where it lands. */
+.lib-sections { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 22px; }
+.sec-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--dim);
+}
+.sec-chip:hover:not(:disabled) { background: rgba(255, 255, 255, .05); border-color: var(--line-2); color: var(--gray); }
+.sec-chip.on { color: var(--white); border-color: var(--white); }
+.sec-count { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.sec-chip.on .sec-count { color: var(--gray); }
+.sec-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  font-size: 12.5px;
+  background: transparent;
+  border: 1px dashed var(--line-2);
+  border-radius: 999px;
+  color: var(--dim);
+}
+.sec-add:hover:not(:disabled) { color: var(--white); background: transparent; border-color: var(--line-3); }
+.sec-add svg { width: 13px; height: 13px; }
+/* While a card is in flight, every chip reads as a place it can go. */
+body.sorting .sec-chip { border-style: dashed; }
+.sec-chip.drop-over { color: var(--white); border: 1px solid var(--white); background: rgba(255, 255, 255, .08); }
+
+.lib-group {
+  margin-bottom: 30px;
+  border-radius: calc(var(--radius) + 6px);
+  outline: 1.5px dashed transparent;
+  outline-offset: 8px;
+  transition: outline-color .15s var(--e), background .15s var(--e);
+}
+.lib-group.drop-over { outline-color: var(--line-3); background: rgba(255, 255, 255, .02); }
+.lib-group.folded { margin-bottom: 12px; }
+.lib-group.folded .grid, .lib-group.folded .group-drop { display: none; }
+.group-head { display: flex; align-items: center; gap: 10px; min-height: 30px; margin-bottom: 12px; position: relative; }
+/* Same trap as the card: the header's ⋯ menu must paint over the grid below. */
+.group-head:has(.menu-pop) { z-index: 27; }
+.group-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 0;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--white);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -.02em;
+  white-space: nowrap;
+}
+button.group-title:hover:not(:disabled) { background: none; border-color: transparent; color: var(--gray); }
+button.group-title:active:not(:disabled) { transform: none; }
+.group-title .chevron { width: 14px; height: 14px; color: var(--dim); transition: transform .18s var(--e); }
+.lib-group.folded .chevron { transform: rotate(-90deg); }
+.group-title .lib-count { margin-left: 2px; }
+.group-hint { color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.group-rule { flex: 1; min-width: 20px; height: 1px; background: var(--line); }
+.group-actions { position: relative; display: flex; }
+.group-drop {
+  border: 1.5px dashed var(--line-2);
+  border-radius: var(--radius);
+  padding: 28px 20px;
+  text-align: center;
+  color: var(--dim);
+  font-size: 13px;
+}
+.lib-group.drop-over .group-drop { border-color: var(--white); color: var(--white); }
 
 /* ---------- card overflow menu ---------- */
 .menu-pop {
@@ -625,6 +718,8 @@ input[type="checkbox"] { accent-color: var(--white); width: 14px; height: 14px; 
 }
 .menu-pop button:hover { background: rgba(255, 255, 255, .07); border-color: transparent; color: var(--white); }
 .menu-pop svg { color: var(--dim); }
+.menu-pop button.current, .menu-pop button.current svg { color: var(--white); }
+.menu-pop button.has-sub::after { content: "›"; margin-left: auto; color: var(--dim); font-size: 15px; line-height: 1; }
 
 /* ---------- command palette ---------- */
 .cmd-modal { align-items: flex-start; padding-top: 12vh; }
@@ -708,6 +803,34 @@ body.dropping .drop-hint { display: flex; }
   color: var(--white);
   background: var(--surface);
 }
+
+/* The first-run popup: how to add your own folders, until one has been added.
+   Bottom center, clear of the toasts' corner, under every modal. */
+.drop-tip {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 32px);
+  padding: 12px 12px 12px 16px;
+  background: var(--surface-2);
+  border: 1.5px dashed var(--line-3);
+  border-radius: 14px;
+  box-shadow: var(--shadow-md);
+  color: var(--white);
+  font-size: 13.5px;
+  font-weight: 500;
+  z-index: 35;
+  animation: tip-in .3s var(--e);
+}
+.drop-tip > svg { width: 18px; height: 18px; color: var(--gray); }
+.drop-tip .toast-close { margin-left: 4px; }
+/* The real drop overlay takes over while something is being dragged in. */
+body.dropping .drop-tip { display: none; }
+@keyframes tip-in { from { opacity: 0; transform: translate(-50%, 10px); } }
 
 /* ---------- palette drawer ---------- */
 .drawer {
@@ -1246,3 +1369,190 @@ textarea:focus { border-color: var(--line-2); background: var(--surface-3); }
 .badge.public.always.second { top: 34px; }
 /* The guest hint under the checkbox is a block, so the token field below it breathes. */
 #shareGuestHint { display: block; margin-bottom: 14px; }
+
+/* ---------- ShowCase ----------
+   Left: tiles to pick from (one = a show, several = a reel). Right: the
+   director's panel, which becomes the remote while a show is on. White stays
+   spent on one thing per surface: Present, then Pause. */
+.sc-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 22px; align-items: start; }
+@media (max-width: 980px) { .sc-layout { grid-template-columns: 1fr; } }
+.sc-pick-hint { margin-right: auto; color: var(--dim); }
+.sc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 12px;
+}
+.sc-tile {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0;
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color .18s var(--e), transform .18s var(--e), box-shadow .18s var(--e);
+}
+.sc-tile:hover:not(:disabled) { background: var(--surface); border-color: var(--line-2); transform: translateY(-2px); box-shadow: var(--shadow-md); }
+.sc-tile.on { border-color: var(--white); box-shadow: 0 0 0 1px var(--white); }
+.sc-tile .thumb { aspect-ratio: 16/10; border-radius: 11px 11px 0 0; }
+.sc-tile .thumb .letter { font-size: 26px; }
+.sc-tile-name {
+  display: block;
+  padding: 9px 11px 10px;
+  color: var(--white);
+  font-size: 12.5px;
+  font-weight: 550;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-tile-order {
+  position: absolute;
+  top: 8px; left: 8px;
+  min-width: 22px; height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--white);
+  color: var(--ink);
+  font-size: 11.5px;
+  font-weight: 650;
+  font-family: var(--mono);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-sm);
+}
+.sc-tile.on .sc-tile-order { display: inline-flex; }
+.sc-tile .badge { pointer-events: none; }
+
+.sc-side { min-width: 0; }
+.sc-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.sc-group { display: flex; flex-direction: column; gap: 8px; }
+.sc-group.sc-two { flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; }
+.sc-group.sc-row { flex-direction: row; flex-wrap: wrap; gap: 6px; }
+.sc-two > select { padding: 5px 9px; font-size: 12.5px; max-width: 58%; }
+.sc-two > .opt-text, .opt-text { color: var(--dim); font-size: 13px; }
+.sc-label {
+  display: flex;
+  justify-content: space-between;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: .2em;
+  text-transform: uppercase;
+}
+.sc-value { color: var(--gray); letter-spacing: 0; text-transform: none; font-size: 11px; }
+.sc-panel input[type="text"] { font-size: 12.5px; padding: 7px 11px; }
+
+/* Segmented control: one white segment, the rest quiet. */
+.seg { display: flex; gap: 2px; padding: 3px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; }
+.seg button {
+  flex: 1 1 0;
+  padding: 5px 4px;
+  font-size: 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.seg button:hover:not(:disabled) { color: var(--white); background: rgba(255, 255, 255, .06); border-color: transparent; }
+.seg button.on { background: var(--white); color: var(--ink); font-weight: 600; }
+
+/* Range: a hairline with a white knob. */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track { height: 2px; background: var(--line-2); border-radius: 2px; }
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px; height: 16px;
+  margin-top: -7px;
+  border-radius: 50%;
+  background: var(--white);
+  border: none;
+  box-shadow: var(--shadow-sm);
+}
+input[type="range"]:focus-visible { outline: none; }
+input[type="range"]:focus-visible::-webkit-slider-thumb { outline: 2px solid var(--white); outline-offset: 3px; }
+.sc-scale { display: flex; justify-content: space-between; color: var(--faint); font-size: 10.5px; margin-top: -4px; }
+
+.sc-present { width: 100%; padding: 11px 20px; font-size: 14px; }
+.sc-keys { color: var(--faint); font-size: 11px; line-height: 1.9; text-align: center; margin-bottom: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.sc-keys kbd { margin: 0 1px; }
+
+/* ---- the remote ---- */
+.sc-remote-head { display: flex; align-items: center; justify-content: space-between; }
+.sc-live { display: inline-flex; align-items: center; gap: 8px; color: var(--white); font-size: 12.5px; font-weight: 600; letter-spacing: -.01em; }
+.sc-live .tick { animation: pulse 1.6s ease-in-out infinite; }
+.sc-now { display: flex; flex-direction: column; gap: 3px; }
+.sc-now-site { color: var(--white); font-weight: 600; font-size: 15px; letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sc-now-page { color: var(--dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 18px; }
+.sc-progress { height: 2px; background: var(--line); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+.sc-progress span { display: block; height: 100%; width: 0; background: var(--white); transition: width .3s linear; }
+.sc-transport { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.sc-transport .icon-btn { padding: 9px; }
+.sc-transport .icon-btn svg { width: 18px; height: 18px; }
+.sc-play { display: inline-flex; align-items: center; gap: 8px; padding: 9px 22px; min-width: 128px; justify-content: center; }
+.sc-play svg { width: 14px; height: 14px; fill: currentColor; stroke: none; }
+.sc-stepper { display: flex; gap: 4px; }
+.sc-stepper button { min-width: 36px; font-family: var(--mono); }
+.sc-sites { display: flex; flex-direction: column; gap: 2px; }
+.sc-site-btn {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 9px;
+  font-size: 12.5px;
+  text-align: left;
+  background: transparent; border-color: transparent; color: var(--dim);
+}
+.sc-site-btn:hover:not(:disabled) { color: var(--white); background: rgba(255, 255, 255, .06); border-color: transparent; }
+.sc-site-btn.on { color: var(--white); background: var(--surface-2); }
+.sc-site-btn .n { font-family: var(--mono); font-size: 10.5px; color: var(--faint); min-width: 14px; }
+.sc-site-btn.on .n { color: var(--gray); }
+.sc-row .pill.on { background: var(--white); color: var(--ink); border-color: transparent; font-weight: 600; }
+.sc-end { align-self: center; color: var(--dim); background: transparent; border-color: transparent; }
+.sc-end:hover:not(:disabled) { color: var(--danger); background: rgba(255, 90, 78, .08); border-color: transparent; }
+
+.sc-group.off { opacity: .4; pointer-events: none; }
+
+/* ---- storyboard, shots and the record group ---- */
+.seg.seg-wrap { flex-wrap: wrap; }
+.seg.seg-wrap button { flex: 1 1 30%; }
+.sc-hint { color: var(--faint); font-size: 11.5px; line-height: 1.45; margin-top: -2px; }
+.sc-checks { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+.sc-checks .opt { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sc-music { display: flex; align-items: center; gap: 8px; }
+.sc-music-name { flex: 1; min-width: 0; color: var(--dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sc-rec { margin-left: 10px; padding: 2px 7px; border-radius: 999px; background: #FF3B30; color: #fff; font-family: var(--mono); font-size: 9.5px; letter-spacing: .16em; animation: pulse 1.4s ease-in-out infinite; }
+.sc-board { display: flex; flex-direction: column; gap: 1px; max-height: 210px; overflow-y: auto; padding: 4px; margin: -4px; border-radius: 10px; }
+.sc-shot {
+  display: flex; align-items: center; gap: 9px;
+  padding: 5px 8px;
+  font-size: 12px;
+  text-align: left;
+  background: transparent; border-color: transparent; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sc-shot .ic { width: 14px; text-align: center; color: var(--faint); font-size: 11px; flex: none; }
+.sc-shot:hover:not(:disabled) { color: var(--white); background: rgba(255, 255, 255, .06); border-color: transparent; }
+.sc-shot.done { color: var(--faint); }
+.sc-shot.done .ic { color: var(--faint); }
+.sc-shot.on { color: var(--ink); background: var(--white); font-weight: 600; }
+.sc-shot.on .ic { color: var(--ink); }
+#scPageRow .sc-value { flex: 1; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#scRecordBtn.on { background: #FF3B30; color: #fff; border-color: transparent; font-weight: 600; }

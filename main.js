@@ -1,4 +1,4 @@
-// SiteSlurp — capture any website, extract it into editable files, host it locally.
+// Local Dev Studio — capture any website, extract it into editable files, host it locally, present it.
 const { app, BrowserWindow, ipcMain, shell, dialog, screen, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
@@ -6,7 +6,7 @@ const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 
 // ---------- MCP mode ----------
-// `claude mcp add siteslurp -- "<exe>" --mcp` launches this same binary, and
+// `claude mcp add local-dev-studio -- "<exe>" --mcp` launches this same binary, and
 // the stdio it holds IS the MCP transport. Re-run ourselves as plain Node on
 // the mcp entry (ELECTRON_RUN_AS_NODE — the lib/paths.js trick), inherit the
 // pipes, and mirror the child's exit: no window, no Chromium, and none of the
@@ -67,21 +67,34 @@ const certs = require('./lib/certs');
 const { runDeploy, runRemove, siteNameFor, adapterFor } = require('./lib/deploy');
 const secrets = require('./lib/secrets');
 const { StudioBrowsers } = require('./lib/studioBrowser');
+const { Showcase } = require('./lib/showcase');
 const { captureAnnotationShots } = require('./lib/shots');
 const { locateSource } = require('./lib/sourceline');
 const { makeThumb } = require('./lib/thumbs');
 const { attachAccelerators, zoomBy } = require('./lib/accelerators');
 const { findEditor } = require('./lib/editor');
 
-// This app shipped as "SiteSnap" through 1.x, and the rename moved the profile
-// folder. Copy the old profile (settings, projects, reviews) into the new
-// location once, before anything below opens it, so nothing is lost.
+// This app shipped as "SiteSnap" through 1.x, as "SiteSlurp Studio" through
+// 2.6, as "NightShyft Studio" through 2.8 and as "OpenDevStudio" in 2.9, and
+// each rename moved the profile
+// folder. Bring the newest old profile (settings, projects, reviews, snapshots,
+// shares) into the new location once, before anything below opens it, so
+// nothing is lost. A rename is instant and leaves no duplicate; when that isn't
+// possible (another volume, the target already created), fall back to a copy.
 try {
   const newData = app.getPath('userData');
-  const oldData = path.join(app.getPath('appData'), 'SiteSnap');
-  if (!fs.existsSync(path.join(newData, 'settings.json'))
-      && fs.existsSync(path.join(oldData, 'settings.json'))) {
-    fs.cpSync(oldData, newData, { recursive: true, force: false });
+  if (!fs.existsSync(path.join(newData, 'settings.json'))) {
+    for (const legacy of ['OpenDevStudio', 'NightShyft Studio', 'SiteSlurp Studio', 'SiteSnap']) {
+      const oldData = path.join(app.getPath('appData'), legacy);
+      if (!fs.existsSync(path.join(oldData, 'settings.json'))) continue;
+      try {
+        if (fs.existsSync(newData)) fs.rmdirSync(newData); // only an empty shell goes
+        fs.renameSync(oldData, newData);
+      } catch {
+        fs.cpSync(oldData, newData, { recursive: true, force: false });
+      }
+      break;
+    }
   }
 } catch { /* a failed migration must not stop the launch */ }
 
@@ -167,12 +180,12 @@ const grabManager = new GrabManager({
 hosts.grabFor = (dir, opts) => grabManager.forDir(dir, opts);
 
 // ---------- in-page menu ----------
-// Every locally hosted page gets the SiteSlurp menu: a small button that opens
+// Every locally hosted page gets the Local Dev Studio menu: a small button that opens
 // the in-page tools as toggles. Audit mode used to need its own button on the
 // Studio card; now it flips on from the page itself, hosting-style.
 const menuManager = new MenuManager({
   clientPath: path.join(__dirname, 'renderer', 'slurp-menu.js'),
-  logoPath: path.join(__dirname, 'renderer', 'slurp-logo.png'),
+  logoPath: path.join(__dirname, 'renderer', 'nightshyft-mark.png'),
   siteFor: dir => {
     const project = projects.byPath(dir);
     return {
@@ -384,7 +397,7 @@ const controlServer = new ControlServer({
   }),
   // The MCP resolve: same store update as the pin popup's Resolve, same [PRO]
   // verification behind it — this is the loop closing (agent fixes, resolves,
-  // SiteSlurp photographs the proof).
+  // Local Dev Studio photographs the proof).
   resolveAnnotation: async (project, annotation, { note, afterRating } = {}) => {
     const patch = { resolved: true };
     if (afterRating !== undefined && afterRating !== null) patch.resolvedRating = afterRating;
@@ -468,9 +481,36 @@ function httpsUrlFor(project) {
   return `https://${certs.hostSlug(project.name)}.slurp.localhost:${httpsPort}/`;
 }
 
+// ---------- ShowCase ----------
+// One presentation window at a time: the hosted site in a sandboxed view,
+// driven by the director in lib/showcase.js and remote-controlled from the
+// main window's ShowCase tab.
+const showcase = new Showcase({
+  stagePath: path.join(__dirname, 'renderer', 'showcase-stage.html'),
+  clientPath: path.join(__dirname, 'renderer', 'showcase-client.js'),
+  preloadPath: path.join(__dirname, 'preload.js'),
+  urlFor: async project => `http://localhost:${await ensureHosted(project)}/`,
+  // What the title card prints under the name: the 24/7 link if there is one,
+  // else where the capture came from.
+  publicUrlFor: project => {
+    if (project.deploy && project.deploy.url) return project.deploy.url.replace(/^https?:\/\//, '');
+    const manifest = readManifest(project.path) || {};
+    try { return manifest.url ? new URL(manifest.url).host : ''; } catch { return ''; }
+  },
+  // A capture's links still point at the site it came from; the show maps
+  // them back onto the hosted copy.
+  sourceUrlFor: project => (readManifest(project.path) || {}).url || '',
+  // Recordings land beside the captures, in their own folder.
+  recordDir: () => path.join(settings.load().capturesRoot, 'Reels'),
+  anchorDisplay: () => (win && !win.isDestroyed() ? screen.getDisplayMatching(win.getBounds()) : screen.getPrimaryDisplay()),
+  onState: state => send('showcase:state', state),
+  brand: { name: 'NightShyft Studio', site: 'nightshyftstudios.com' },
+  log,
+});
+
 /** Host a project on its registered port (sliding to a free one if squatted)
- *  and persist what it actually got. The one door review mode, Studio Browser
- *  and the control API all go through. */
+ *  and persist what it actually got. The one door review mode, Studio Browser,
+ *  ShowCase and the control API all go through. */
 async function ensureHosted(project) {
   const runtime = projects.runtimeFor(project);
   if (runtime.kind === 'command' && runtime.id !== 'attach' && runtimes.needsInstall(project.path, runtime)) {
@@ -582,7 +622,7 @@ function assertInRoot(dir, what = 'That folder') {
 /** The looser gate for read-and-serve operations (hosting, thumbnails, opening):
  *  the captures root plus every folder the user explicitly registered as a
  *  project. Content-mutating operations (palette, video fix, delete, zip) keep
- *  the strict in-root rule — SiteSlurp edits its own captures, not your repos. */
+ *  the strict in-root rule — Local Dev Studio edits its own captures, not your repos. */
 function assertManaged(dir, what = 'That folder') {
   if (typeof dir !== 'string' || !dir.trim()) throw new Error(`${what} is missing.`);
   if (!isInRoot(dir) && !hosts.portFor(dir) && !projects.byPath(dir)) {
@@ -795,7 +835,7 @@ async function runCapture(opts) {
     const co = resolveCaptureOptions(opts);   // also remembers the options
     const current = settings.load();
     const singleFilePath = findSingleFile(current.singleFilePath);
-    if (!singleFilePath) throw new Error('The bundled page-capture engine is missing. Reinstall SiteSlurp.');
+    if (!singleFilePath) throw new Error('The bundled page-capture engine is missing. Reinstall Local Dev Studio.');
     const browserPath = await resolveBrowser();
     if (!browserPath) {
       throw new Error('No Chromium browser found. Install Google Chrome or Microsoft Edge, then set it in Settings.');
@@ -834,6 +874,7 @@ async function runCapture(opts) {
       // A capture made with scripts kept needs its reveal styles left alone —
       // the kept scripts animate them; tearing them out blanks the page.
       keepHiddenStyles: !!co.keepScripts,
+      siteUrl: url,
       signal: controller.signal,
       onProgress: p => send('run:progress', p),
     }, runLog));
@@ -889,6 +930,7 @@ async function runExtract(rawDir, { overwrite = false } = {}) {
     const stats = await versions.suppressAuto(() => extractSite(rawDir, outDir, {
       overwrite,
       keepHiddenStyles: !!manifest.keepScripts,
+      siteUrl: manifest.url,
       signal: controller.signal,
       onProgress: p => send('run:progress', p),
     }, runLog));
@@ -968,7 +1010,7 @@ async function runRecapture(project) {
   try {
     const current = settings.load();
     const singleFilePath = findSingleFile(current.singleFilePath);
-    if (!singleFilePath) throw new Error('The bundled page-capture engine is missing. Reinstall SiteSlurp.');
+    if (!singleFilePath) throw new Error('The bundled page-capture engine is missing. Reinstall Local Dev Studio.');
     const browserPath = await resolveBrowser();
     if (!browserPath) {
       throw new Error('No Chromium browser found. Install Google Chrome or Microsoft Edge, then set it in Settings.');
@@ -1003,6 +1045,7 @@ async function runRecapture(project) {
     const outDir = uniqueOutDir(rawDir + '_extracted');
     const stats = await versions.suppressAuto(() => extractSite(rawDir, outDir, {
       keepHiddenStyles: !!co.keepScripts,
+      siteUrl: manifest.url,
       signal: controller.signal,
       onProgress: p => send('run:progress', p),
     }, runLog));
@@ -1155,6 +1198,7 @@ function registerIpc() {
           https: !!project.https,
           httpsUrl: httpsUrlFor(project),
           deploy: project.deploy || null,
+          section: project.section || null,
           reviewActive: reviewManager.isActive(site.dir),
         }
         : site;
@@ -1173,13 +1217,32 @@ function registerIpc() {
         httpsUrl: httpsUrlFor(project),
         deploy: project.deploy || null,
         attachOnly: !!project.attachOnly,
+        section: project.section || null,
         reviewActive: reviewManager.isActive(project.path),
         port: hosts.portFor(project.path),
         runtimeState: hosts.runtimeState(project.path),
       });
     }
     sites.sort((a, b) => b.mtime - a.mtime);
-    return { ...list, sites: sites.map(s => ({ ...s, share: shareStateFor(s.dir) })) };
+    return {
+      ...list,
+      sections: projects.sections(),
+      sites: sites.map(s => ({ ...s, share: shareStateFor(s.dir) })),
+    };
+  });
+
+  // ---------- library sections ----------
+  // The user's own shelves for sorting the library (client sites, concepts,
+  // their own sites). The renderer refreshes the library after each change;
+  // library:list is what says which project sits where.
+  handle('section:create', ({ name }) => projects.addSection(name));
+  handle('section:rename', ({ id, name }) => projects.renameSection(id, name));
+  handle('section:remove', ({ id }) => projects.removeSection(id));
+  handle('section:move', ({ id, offset }) => projects.moveSection(id, offset));
+  handle('project:setSection', ({ id, section }) => {
+    const project = projects.update(id, { section: section || null });
+    if (!project) throw new Error('Unknown project.');
+    return project.section;
   });
 
   handle('project:addLocal', async ({ path: dir }) => {
@@ -1530,6 +1593,45 @@ function registerIpc() {
     return true;
   });
 
+  // ---------- ShowCase ----------
+  handle('showcase:displays', () => showcase.displays());
+  handle('showcase:start', ({ ids, options }) => {
+    const list = (Array.isArray(ids) ? ids : []).map(id => projects.byId(id)).filter(Boolean);
+    if (!list.length) throw new Error('Pick at least one site to present.');
+    for (const project of list) {
+      if (project.attachOnly) continue;
+      if (!fs.existsSync(project.path)) throw new Error(`"${project.name}" is missing from disk.`);
+    }
+    const state = showcase.start(list, options);
+    send('ui:refresh');
+    return state;
+  });
+  handle('showcase:control', ({ action, value }) => showcase.control(String(action || ''), value));
+  handle('showcase:state', () => showcase.state());
+  const scFor = event => {
+    const show = showcase.forSender(event.sender);
+    if (!show) throw new Error('This window is not a ShowCase.');
+    return show;
+  };
+  handle('sc:hello', (payload, event) => scFor(event).hello());
+  handle('sc:stage', (rect, event) => { scFor(event).setStage(rect); return true; });
+  handle('sc:chunk', (chunk, event) => scFor(event).onRecordChunk(chunk));
+  handle('showcase:pickMusic', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Music under the show',
+      properties: ['openFile'],
+      filters: [{ name: 'Audio', extensions: ['mp3', 'm4a', 'aac', 'wav', 'ogg', 'flac', 'opus', 'webm'] }],
+    });
+    return res.canceled || !res.filePaths.length ? null : res.filePaths[0];
+  });
+  handle('showcase:revealRecording', ({ file }) => {
+    const dir = path.join(settings.load().capturesRoot, 'Reels');
+    const resolved = path.resolve(String(file || dir));
+    if (!resolved.startsWith(path.resolve(dir))) throw new Error('Not a recording.');
+    if (fs.existsSync(resolved)) shell.showItemInFolder(resolved); else shell.openPath(dir);
+    return true;
+  });
+
   handle('review:history', ({ id }) => {
     const project = projects.byId(id);
     if (!project) throw new Error('Unknown project.');
@@ -1555,7 +1657,7 @@ function registerIpc() {
     const res = await dialog.showOpenDialog(win, {
       title: 'Import an audit file',
       properties: ['openFile'],
-      filters: [{ name: 'SiteSlurp audit', extensions: ['json'] }],
+      filters: [{ name: 'Local Dev Studio audit', extensions: ['json'] }],
     });
     if (res.canceled || !res.filePaths[0]) return null;
     let raw;
@@ -1563,7 +1665,7 @@ function registerIpc() {
       throw new Error('That file isn\'t readable JSON.');
     }
     if (!raw || raw.siteslurpAudit !== 1 || !Array.isArray(raw.annotations)) {
-      throw new Error('That file isn\'t a SiteSlurp audit export — guests download one from the review bar\'s "Send audit".');
+      throw new Error('That file isn\'t an Local Dev Studio audit export — guests download one from the review bar\'s "Send audit".');
     }
     // A note is a duplicate when the store already has its id (it arrived live
     // over the tunnel) or has imported it before (same file, second pass).
@@ -2163,7 +2265,7 @@ function registerIpc() {
       buttons: [confirmLabel || 'OK', 'Cancel'],
       defaultId: 0,
       cancelId: 1,
-      title: title || 'SiteSlurp Studio',
+      title: title || 'Local Dev Studio',
       message: message || '',
       detail: detail || '',
     });
@@ -2224,7 +2326,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 620,
     backgroundColor: '#0A0A0B',
-    title: 'SiteSlurp Studio',
+    title: 'Local Dev Studio',
     show: false,
     // No OS title bar and no menu strip: the app draws its own 46px bar.
     // Windows paints only the minimise/maximise/close buttons into the reserved
@@ -2274,6 +2376,7 @@ function createWindow() {
   win.on('resize', debounce(persistBounds, 400));
   win.on('move', debounce(persistBounds, 400));
   win.on('close', persistBounds);
+  win.on('close', () => showcase.closeAll());
 
   attachAccelerators({ win, send });
 
@@ -2397,6 +2500,10 @@ function runSelfTest() {
         const clicks = {
           options: ['#btnOptions'],
           studio: ['#doctorClose', '#tab-studio'],
+          showcase: ['#doctorClose', '#tab-showcase'],
+          // Present the first tile for real: proves the show window, the
+          // injected client and the glide, and screenshots the site view.
+          'showcase-run': ['#doctorClose', '#tab-showcase'],
           commands: ['#btnPalette'],
           settings: ['#btnSettings'],
           // The Settings link works even while its modal is hidden — clicking
@@ -2430,6 +2537,103 @@ function runSelfTest() {
             return true;
           })()`);
           await sleep(900);
+        }
+
+        if (show === 'showcase-run') {
+          // The tile named by SLURP_SELFTEST_SITE, else the first one.
+          const wanted = process.env.SLURP_SELFTEST_SITE || '';
+          await win.webContents.executeJavaScript(`(() => {
+            const tiles = [...document.querySelectorAll('.sc-tile')];
+            const tile = tiles.find(t => t.textContent.includes(${JSON.stringify(wanted)})) || tiles[0];
+            if (!tile) throw new Error('no tile to present');
+            const before = document.querySelector('#scPickCount').textContent;
+            tile.click();
+            const after = document.querySelector('#scPickCount').textContent;
+            document.querySelector('#scPresent').click();
+            return { tiles: tiles.map(t => t.textContent), before, after, present: document.querySelector('#scPresent').textContent };
+          })()`).then(r => log.info('selftest showcase picked:', JSON.stringify(r)));
+          const until = async (pred, ms) => {
+            const deadline = Date.now() + ms;
+            let st = showcase.state();
+            while (st.active && !pred(st) && Date.now() < deadline) { await sleep(500); st = showcase.state(); }
+            return st;
+          };
+          // A storyboard has to come out of the page, and the camera has to move.
+          let st = await until(s => s.phase === 'site' && s.board && s.board.length > 0, 60000);
+          log.info('selftest showcase board:', JSON.stringify((st.board || []).map(b => b.label)), 'fixed', JSON.stringify(st.fixed));
+          if (!st.active) failure = 'the show never started';
+          else if (!st.board || !st.board.length) failure = 'no storyboard was built: ' + JSON.stringify(st);
+          else {
+            st = await until(s => s.progress >= 0.03 || s.shot >= 2 || s.phase !== 'site', 60000);
+            log.info('selftest showcase state:', JSON.stringify({ shot: st.shot, progress: st.progress, page: st.page, recording: st.recording }));
+            if (st.phase === 'site' && st.progress < 0.03 && st.shot < 2) failure = 'the show never moved: ' + JSON.stringify(st);
+          }
+          if (!failure) {
+            const outBase = (process.env.SLURP_SELFTEST_OUT || path.join(app.getPath('temp'), 'siteslurp-selftest.png')).replace(/.png$/, '');
+            // The compositor occasionally refuses a capture right after a
+            // resize (UnknownVizError); one retry is all it ever needs.
+            const grab = async wc => {
+              try { return await wc.capturePage(); } catch { await sleep(1500); return wc.capturePage(); }
+            };
+            const shots = async (tag, wait = 1200) => {
+              await sleep(wait);
+              const site = await grab(showcase.show.view.webContents);
+              fs.writeFileSync(`${outBase}-show-${tag}.png`, site.toPNG());
+              const stage = await grab(showcase.show.win.webContents);
+              fs.writeFileSync(`${outBase}-stage-${tag}.png`, stage.toPNG());
+            };
+            await shots('full');
+            // Catch a push-in mid-flight, if the board has one.
+            const detailAt = st.board.findIndex((b, i) => b.kind === 'detail' && i > st.shot);
+            if (detailAt >= 0) {
+              await showcase.control('shot', detailAt);
+              st = await until(s => s.shot === detailAt, 15000);
+              await shots('detail', 1700);
+              log.info('selftest showcase detail shot:', JSON.stringify(st.board[detailAt]), 'bounds', JSON.stringify(showcase.show.view.getBounds()));
+            }
+            await showcase.control('frame', 'phone');
+            await showcase.control('cursor', 'spotlight');
+            await shots('phone');
+            await showcase.control('frame', 'duo');
+            await shots('duo', 3000);
+            await showcase.control('frame', 'laptop');
+            await shots('laptop');
+            await showcase.control('blackout', true);
+            await showcase.control('blackout', false);
+            await showcase.control('frame', 'none');
+            // A tour has to actually reach its second page: the ghost click,
+            // or the plain-load fallback behind it, is the thing under test.
+            const tour = showcase.state().pagesOn && showcase.state().page.count > 1;
+            if (tour) {
+              await showcase.control('nextPage');
+              st = await until(s => s.page.index >= 1 && !s.busy && !showcase.show.view.webContents.isLoadingMainFrame() && s.board && s.board.length > 0, 45000);
+              log.info('selftest showcase tour:', JSON.stringify(st.page), st.busy ? '(still moving)' : '');
+              if (!st.active || st.page.index < 1) failure = 'the tour never reached page 2: ' + JSON.stringify(st.page);
+              else await shots('page2');
+            }
+            const readRemote = () => win.webContents.executeJavaScript(
+              '[...document.querySelectorAll("#scNowSite, #scNowPage, #scPageCount, #scPlay span, #scBoard .sc-shot.on")].map(e => e.textContent).join(" | ")');
+            let remoteText = await readRemote();
+            for (let i = 0; i < 10 && tour && !/Page 2 of/.test(remoteText); i++) {
+              await sleep(500);
+              remoteText = await readRemote();
+            }
+            log.info('selftest showcase remote says:', remoteText);
+            if (tour && !/Page 2 of/.test(remoteText)) failure = 'the remote never showed page 2: ' + remoteText;
+            const remote = await win.webContents.capturePage();
+            fs.writeFileSync(`${outBase}-remote.png`, remote.toPNG());
+            // A recording, if one was asked for, has to land on disk.
+            if (showcase.state().recording) {
+              await showcase.control('record', false);
+              await sleep(3500);
+              const rec = showcase.state().lastRecording;
+              log.info('selftest showcase recording:', JSON.stringify(rec));
+              if (!rec || !rec.path || !fs.existsSync(rec.path) || fs.statSync(rec.path).size < 10000) failure = 'the recording did not land: ' + JSON.stringify(rec);
+            }
+            log.info('selftest showcase shots at', outBase);
+          }
+          showcase.closeAll();
+          await sleep(800);
         }
 
         if (show === 'hosting') {
@@ -2472,7 +2676,7 @@ function runSelfTest() {
 if (!app.requestSingleInstanceLock()) {
   // A second copy would fight over ports and the settings file. Say so out loud:
   // otherwise an automated run just sees a silent exit 0 and no window.
-  console.error('SiteSlurp is already running — bringing the existing window forward.');
+  console.error('Local Dev Studio is already running — bringing the existing window forward.');
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -2490,7 +2694,7 @@ if (!app.requestSingleInstanceLock()) {
     // hosting and leave an unclickable window; showMessageBox doesn't.
     dialog.showMessageBox({
       type: 'error',
-      title: 'SiteSlurp hit an error',
+      title: 'Local Dev Studio hit an error',
       message: err && err.message ? err.message : String(err),
       detail: `The app will keep running, but something may be in a bad state.\n\nDetails were written to:\n${log.logPath()}`,
       buttons: ['Continue', 'Open log'],
@@ -2557,7 +2761,7 @@ if (!app.requestSingleInstanceLock()) {
   }
 
   app.whenReady().then(async () => {
-    log.info(`SiteSlurp ${app.getVersion()} starting — electron ${process.versions.electron}`);
+    log.info(`Local Dev Studio ${app.getVersion()} starting — electron ${process.versions.electron}`);
     registerIpc();
     createWindow();
     initUpdater();

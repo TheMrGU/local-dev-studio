@@ -9,12 +9,16 @@ const INVOKE = new Set([
   'library:list',
   'project:addLocal', 'project:addAttach', 'project:browseFolder',
   'project:remove', 'project:setAutoStart', 'project:setLiveReload',
-  'project:setAutoSnapshot',
+  'project:setAutoSnapshot', 'project:setSection',
+  'section:create', 'section:rename', 'section:remove', 'section:move',
   'project:runtimes', 'project:setRuntime', 'project:install',
   'project:pages', 'project:setEntry',
   'studio:open',
   'sb:hello', 'sb:layout', 'sb:nav', 'sb:annotate', 'sb:pin', 'sb:shot', 'sb:revealShot',
   'sb:consoleTail', 'sb:copyAgent', 'sb:copyText',
+  'showcase:displays', 'showcase:start', 'showcase:control', 'showcase:state',
+  'showcase:pickMusic', 'showcase:revealRecording',
+  'sc:hello', 'sc:stage', 'sc:chunk',
   'version:create', 'version:list', 'version:diff', 'version:readFile', 'version:restore',
   'runtime:state', 'runtime:restart',
   'review:start', 'review:stop', 'review:history', 'review:export', 'review:import',
@@ -45,6 +49,8 @@ const EVENTS = new Set([
   'ui:palette',
   'update:ready',
   'sb:state', 'sb:console',
+  'showcase:state',
+  'sc:frame', 'sc:slate', 'sc:black', 'sc:hint', 'sc:record',
 ]);
 
 // Electron wraps handler errors as "Error invoking remote method 'x': Error: real

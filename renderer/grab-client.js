@@ -2,7 +2,7 @@
 // serve time.
 //
 // Two ways in: hold Alt for a quick grab, or flip "Asset dragger" on in the
-// SiteSlurp menu (bottom-right) to keep it armed. Whatever is under the cursor
+// Local Dev Studio menu (bottom-right) to keep it armed. Whatever is under the cursor
 // becomes draggable. Media elements drop their file's real path on disk (a
 // terminal or AI CLI can open it directly); anything else drops the path of a
 // grab bundle — HTML + matching CSS + asset locations — that the app writes
@@ -300,7 +300,7 @@
 
   const engaged = () => altHeld || sticky;
 
-  // The dragger must never grab SiteSlurp's own surfaces — the menu button,
+  // The dragger must never grab Local Dev Studio's own surfaces — the menu button,
   // the review toolbar — only the page.
   const ownUi = el => !!(el.closest && el.closest('[data-slurp-ui], #__ss-review-host'));
 
@@ -438,7 +438,7 @@
     sticky: () => sticky,
     grab: (el, bundle) => doGrab(el, !!bundle),
   };
-  console.info('SiteSlurp asset dragger: hold Alt (or flip it on in the SiteSlurp menu) and drag any element. '
+  console.info('Local Dev Studio asset dragger: hold Alt (or flip it on in the Local Dev Studio menu) and drag any element. '
     + 'Media drops its local file path, anything else drops a GRAB.md bundle path; '
     + 'Alt+Shift forces a bundle, Alt+scroll widens the selection.');
 })();

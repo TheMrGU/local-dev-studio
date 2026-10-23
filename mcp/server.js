@@ -1,11 +1,11 @@
-// mcp/server.js — SiteSlurp's MCP server: the live wire between a coding agent
+// mcp/server.js — Local Dev Studio's MCP server: the live wire between a coding agent
 // and the running app.
 //
 // Plain Node, no Electron APIs, no SDK: MCP's stdio transport is line-delimited
 // JSON-RPC 2.0, which is small enough to speak by hand. main.js relaunches the
 // app binary with ELECTRON_RUN_AS_NODE=1 pointing here when it sees --mcp (the
 // same trick lib/paths.js plays for single-file-cli), so `claude mcp add
-// siteslurp -- "<exe>" --mcp` is the whole setup.
+// local-dev-studio -- "<exe>" --mcp` is the whole setup.
 //
 // Every tool call is a thin HTTP request to the control API the running app
 // exposes on loopback (lib/control.js); this process holds no state of its
@@ -17,7 +17,7 @@ const path = require('path');
 const http = require('http');
 
 const PROTOCOL_VERSION = '2025-06-18';
-const APP_NOT_RUNNING = 'SiteSlurp Studio isn\'t running. Start it and retry.';
+const APP_NOT_RUNNING = 'Local Dev Studio isn\'t running. Start it and retry.';
 
 // The launcher (main.js --mcp) passes where the app keeps its profile; a
 // control.json lives there while the app runs.
@@ -76,7 +76,7 @@ const str = (desc, extra = {}) => ({ type: 'string', description: desc, ...extra
 const TOOLS = [
   {
     name: 'list_projects',
-    description: 'List every project in the SiteSlurp library: id, name, whether it is hosted right now (and at what URL), and how many annotations are open.',
+    description: 'List every project in the Local Dev Studio library: id, name, the library section it is filed under (e.g. "Client Websites", null when unsorted), whether it is hosted right now (and at what URL), and how many annotations are open.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     run: () => control('GET', '/v1/projects'),
   },
@@ -107,7 +107,7 @@ const TOOLS = [
   },
   {
     name: 'resolve_annotation',
-    description: 'Mark an annotation fixed after changing the code. SiteSlurp re-screenshots the element and pixel-diffs it against the original — if nothing changed visually, the resolve is flagged for the reviewer.',
+    description: 'Mark an annotation fixed after changing the code. Local Dev Studio re-screenshots the element and pixel-diffs it against the original — if nothing changed visually, the resolve is flagged for the reviewer.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -157,8 +157,8 @@ const TOOLS = [
 
 /* ---------- resources ---------- */
 
-const CALIBRATION_URI = 'siteslurp://calibration.md';
-const reviewUri = id => `siteslurp://projects/${id}/REVIEW.md`;
+const CALIBRATION_URI = 'localdevstudio://calibration.md';
+const reviewUri = id => `localdevstudio://projects/${id}/REVIEW.md`;
 
 async function listResources() {
   const { projects } = await control('GET', '/v1/projects');
@@ -182,7 +182,7 @@ async function readResource(uri) {
     const { markdown } = await control('GET', '/v1/calibration');
     return { contents: [{ uri, mimeType: 'text/markdown', text: markdown }] };
   }
-  const match = /^siteslurp:\/\/projects\/([^/]+)\/REVIEW\.md$/.exec(String(uri || ''));
+  const match = /^localdevstudio:\/\/projects\/([^/]+)\/REVIEW\.md$/.exec(String(uri || ''));
   if (!match) throw new Error(`Unknown resource: ${uri}`);
   const { markdown } = await control('GET', `/v1/review?project=${encodeURIComponent(match[1])}`);
   return { contents: [{ uri, mimeType: 'text/markdown', text: markdown }] };
@@ -207,7 +207,7 @@ async function handle(msg) {
         reply(id, {
           protocolVersion: typeof params.protocolVersion === 'string' ? params.protocolVersion : PROTOCOL_VERSION,
           capabilities: { tools: {}, resources: {} },
-          serverInfo: { name: 'siteslurp', version: serverVersion },
+          serverInfo: { name: 'local-dev-studio', version: serverVersion },
         });
         return;
       case 'ping':

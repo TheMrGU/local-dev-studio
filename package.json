@@ -1,8 +1,9 @@
 {
-  "name": "siteslurp",
-  "productName": "SiteSlurp Studio",
-  "version": "2.6.2",
-  "description": "Slurp any website into editable files, host and manage client sites locally, and turn on-page feedback into AI-ready specs.",
+  "name": "local-dev-studio",
+  "productName": "Local Dev Studio",
+  "version": "2.10.0",
+  "description": "Local Developer Studio: capture any website into editable files, host and manage client sites locally, turn on-page feedback into AI-ready specs, and present any site on the big screen.",
+  "homepage": "https://localdevstudio.com",
   "main": "main.js",
   "author": {
     "name": "NightShyft Studios"
@@ -31,7 +32,7 @@
   },
   "build": {
     "appId": "com.nightshyft.siteslurp",
-    "productName": "SiteSlurp Studio",
+    "productName": "Local Dev Studio",
     "copyright": "Copyright © 2026 NightShyft Studios",
     "directories": {
       "output": "dist",
@@ -71,8 +72,8 @@
           ]
         }
       ],
-      "icon": "build/icon.png",
-      "artifactName": "SiteSlurp-${version}-${arch}.${ext}"
+      "icon": "build/icon.ico",
+      "artifactName": "LocalDevStudio-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -80,18 +81,18 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "SiteSlurp Studio",
-      "artifactName": "SiteSlurp-Setup-${version}.${ext}",
-      "uninstallDisplayName": "SiteSlurp Studio ${version}"
+      "shortcutName": "Local Dev Studio",
+      "artifactName": "LocalDevStudio-Setup-${version}.${ext}",
+      "uninstallDisplayName": "Local Dev Studio ${version}"
     },
     "portable": {
-      "artifactName": "SiteSlurp-${version}-portable.${ext}",
-      "unpackDirName": "SiteSlurp"
+      "artifactName": "LocalDevStudio-${version}-portable.${ext}",
+      "unpackDirName": "LocalDevStudio"
     },
     "publish": {
       "provider": "github",
       "owner": "TheMrGU",
-      "repo": "siteslurp"
+      "repo": "local-dev-studio"
     }
   }
 }

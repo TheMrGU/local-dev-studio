@@ -1,4 +1,4 @@
-/* SiteSlurp Review Mode overlay.
+/* Local Dev Studio Review Mode overlay.
  *
  * Injected at serve time into pages hosted in review mode. Everything lives in
  * a closed shadow root so the host page's CSS can't touch it and ours can't
@@ -1326,7 +1326,7 @@
     state.hoverEl = null;
   }
 
-  // SiteSlurp's other in-page surfaces (the menu button, the grab overlay)
+  // Local Dev Studio's other in-page surfaces (the menu button, the grab overlay)
   // mark their hosts with data-slurp-ui — they are chrome, not the page.
   const ownNode = target => target === host || host.contains(target)
     || !!(target && target.closest && target.closest('[data-slurp-ui]'));

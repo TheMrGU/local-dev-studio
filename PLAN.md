@@ -1,3 +1,5 @@
+> **Historical document.** Written when the app was SiteSlurp Studio and this repo lived at `Desktop\Projects\SiteSnap`. The app is now **Local Dev Studio** (2.10.0+) and the repo is `Desktop\Projects\Local Dev Studio\App`.
+
 # SiteSlurp Studio — Master Implementation Plan (v2.2.0 → 3.x)
 
 **Audience:** a fresh coding agent with zero prior context, working in the SiteSlurp source repository.

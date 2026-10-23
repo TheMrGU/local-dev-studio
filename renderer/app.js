@@ -1,9 +1,10 @@
-/* SiteSlurp renderer */
+/* Local Dev Studio renderer */
 const $ = sel => document.querySelector(sel);
 const invoke = (channel, data) => window.snap.invoke(channel, data);
 
 const state = {
-  library: { root: '', sites: [], missing: false },
+  library: { root: '', sites: [], sections: [], missing: false },
+  libraryLoaded: false,
   env: null,
   settings: null,
   busy: false,
@@ -11,6 +12,9 @@ const state = {
   paletteDir: null,
   paletteFrom: null,
   filter: '',
+  section: 'all',         // the library section the Studio tab is showing
+  collapsed: new Set(),   // sections folded shut in the "all" view
+  dropTipDismissed: false,
   runStarted: 0,
   runTimer: null,
   zipToast: null,
@@ -19,8 +23,8 @@ const state = {
 /* ---------- tabs ----------
    Extractor owns capturing and the run log; Studio owns hosting and the
    library. Anything that starts a run pulls the user back to Extractor so the
-   log is never running behind a hidden tab. */
-const TABS = ['extractor', 'studio'];
+   log is never running behind a hidden tab. ShowCase owns presenting. */
+const TABS = ['extractor', 'studio', 'showcase'];
 
 function setTab(name, { persist = true } = {}) {
   if (!TABS.includes(name)) name = 'extractor';
@@ -33,6 +37,7 @@ function setTab(name, { persist = true } = {}) {
     document.getElementById('view-' + tab).classList.toggle('hidden', !on);
   }
   window.scrollTo({ top: 0 });
+  updateDropTip();
   if (persist) invoke('settings:set', { tab: name }).catch(() => {});
 }
 
@@ -105,14 +110,14 @@ function problems() {
       title: 'No Chromium browser found',
       detail: env.browser.installed.length
         ? 'Pick one in Settings.'
-        : 'SiteSlurp drives a real browser so React and other JS-heavy sites render before they are saved. Install Microsoft Edge or Google Chrome, then reopen this dialog.',
+        : 'Local Dev Studio drives a real browser so React and other JS-heavy sites render before they are saved. Install Microsoft Edge or Google Chrome, then reopen this dialog.',
     });
   } else {
     list.push({ ok: true, title: `Browser: ${env.browser.name}`, detail: env.browser.path });
   }
   list.push(env.singleFile.ok
     ? { ok: true, title: `Capture engine ready${env.singleFile.bundled ? ' (bundled)' : ''}`, detail: env.singleFile.path }
-    : { ok: false, title: 'Capture engine missing', detail: 'Reinstall SiteSlurp, or point Settings → Advanced at a single-file-cli install.' });
+    : { ok: false, title: 'Capture engine missing', detail: 'Reinstall Local Dev Studio, or point Settings → Advanced at a single-file-cli install.' });
   list.push(env.capturesRoot.ok
     ? { ok: true, title: 'Captures folder writable', detail: env.capturesRoot.path }
     : { ok: false, title: 'Captures folder is not writable', detail: `${env.capturesRoot.path} — pick another folder in Settings.` });
@@ -121,9 +126,9 @@ function problems() {
 
 function openDoctor(firstRun = false) {
   const list = problems();
-  $('#doctorTitle').textContent = firstRun ? 'Welcome to SiteSlurp Studio' : 'Setup & diagnostics';
+  $('#doctorTitle').textContent = firstRun ? 'Welcome to Local Dev Studio' : 'Setup & diagnostics';
   $('#doctorIntro').textContent = firstRun
-    ? 'Paste any URL and SiteSlurp saves the whole site, unpacks it into editable files, and hosts it on localhost. Here is what it found on this machine:'
+    ? 'Paste any URL and Local Dev Studio saves the whole site, unpacks it into editable files, and hosts it on localhost. Here is what it found on this machine:'
     : '';
   const ul = $('#doctorList');
   ul.innerHTML = '';
@@ -214,9 +219,9 @@ async function openSettings() {
   // launched. The exe path differs per machine, so they're composed here.
   if (env.agent) {
     const quoted = /\s/.test(env.agent.exe) ? `"${env.agent.exe}"` : env.agent.exe;
-    $('#agentClaude').value = `claude mcp add siteslurp -- ${quoted} ${env.agent.args.join(' ')}`;
+    $('#agentClaude').value = `claude mcp add local-dev-studio -- ${quoted} ${env.agent.args.join(' ')}`;
     $('#agentCursor').value = JSON.stringify({
-      mcpServers: { siteslurp: { command: env.agent.exe, args: env.agent.args } },
+      mcpServers: { 'local-dev-studio': { command: env.agent.exe, args: env.agent.args } },
     });
   }
   $('#settingsModal').classList.remove('hidden');
@@ -658,7 +663,7 @@ async function hostSite(dir, site = null) {
       ? `Connected — fronting your server on localhost:${port}`
       : booting
         ? `Starting ${site.runtime.label} on localhost:${port} — the page turns into the site when it's up`
-        : `Hosting on localhost:${port} — the SiteSlurp button on the page holds the asset dragger & audit mode`,
+        : `Hosting on localhost:${port} — the Local Dev Studio button on the page holds the asset dragger & audit mode`,
     { kind: 'ok', timeout: booting ? 9000 : undefined, action: { label: 'Open', fn: () => invoke('open:url', { url }) } });
     await refreshLibrary();
   } catch (err) {
@@ -938,7 +943,7 @@ $('#btnStopAll').addEventListener('click', async () => {
 });
 
 /* ---------- attach to a dev server ----------
-   The developer's own `npm run dev` keeps its terminal; SiteSlurp fronts the
+   The developer's own `npm run dev` keeps its terminal; Local Dev Studio fronts the
    port it answers on. Loopback only — the main process refuses anything else. */
 function openAttach() {
   $('#attachTarget').value = '';
@@ -1075,11 +1080,39 @@ document.addEventListener('click', e => {
   if (openMenu && !openMenu.contains(e.target) && e.target.closest('.menu-btn') !== openMenu.anchor) closeMenu();
 });
 
-function menuButton(items) {
+/* An item with `submenu` swaps the popover's rows for the ones it returns, with
+   a Back row on top — "Move to section…" lists every section that way instead
+   of growing the card's menu by one row per section. */
+function fillMenu(pop, items, back = null) {
+  pop.innerHTML = '';
+  const rows = back ? [{ icon: 'arrow-left', label: 'Back', stay: true, fn: back }, ...items] : items;
+  for (const item of rows) {
+    const row = document.createElement('button');
+    row.innerHTML = `<svg class="icon"><use href="#i-${item.icon}"/></svg><span></span>`;
+    row.querySelector('span').textContent = item.label;
+    if (item.current) row.classList.add('current');
+    if (item.submenu) row.classList.add('has-sub');
+    row.addEventListener('click', async e => {
+      // The row is about to leave the DOM; letting the click reach the document
+      // would read as "clicked outside the menu" and close it.
+      if (item.submenu || item.stay) {
+        e.stopPropagation();
+        if (item.submenu) fillMenu(pop, item.submenu(), () => fillMenu(pop, items, back));
+        else item.fn();
+        return;
+      }
+      closeMenu();
+      try { await item.fn(); } catch (err) { failed(err); }
+    });
+    pop.appendChild(row);
+  }
+}
+
+function menuButton(items, title = 'More actions') {
   const b = document.createElement('button');
   b.className = 'icon-btn menu-btn';
-  b.title = 'More actions';
-  b.setAttribute('aria-label', 'More actions');
+  b.title = title;
+  b.setAttribute('aria-label', title);
   b.innerHTML = '<svg><use href="#i-more"/></svg>';
   b.addEventListener('click', () => {
     if (openMenu && openMenu.anchor === b) { closeMenu(); return; }
@@ -1087,17 +1120,8 @@ function menuButton(items) {
     const pop = document.createElement('div');
     pop.className = 'menu-pop';
     pop.anchor = b;
-    for (const item of items) {
-      const row = document.createElement('button');
-      row.innerHTML = `<svg class="icon"><use href="#i-${item.icon}"/></svg><span></span>`;
-      row.querySelector('span').textContent = item.label;
-      row.addEventListener('click', async () => {
-        closeMenu();
-        try { await item.fn(); } catch (err) { failed(err); }
-      });
-      pop.appendChild(row);
-    }
-    b.closest('.card-actions').appendChild(pop);
+    fillMenu(pop, typeof items === 'function' ? items() : items);
+    b.closest('.card-actions, .group-actions').appendChild(pop);
     openMenu = pop;
   });
   return b;
@@ -1111,6 +1135,8 @@ function renderCard(site) {
   const card = document.createElement('div');
   card.className = 'card';
   card.dataset.dir = site.dir;
+  // Anything in the registry can be dragged onto another section.
+  if (site.projectId) makeDraggable(card, site);
 
   const thumb = document.createElement('div');
   thumb.className = 'thumb';
@@ -1119,6 +1145,9 @@ function renderCard(site) {
     img.src = site.thumb;
     img.loading = 'lazy';
     img.alt = '';
+    // A dragged <img> carries its file along, which the window's drop handler
+    // would try to add as a project. The card is what gets dragged.
+    img.draggable = false;
     thumb.appendChild(img);
   } else {
     const letter = document.createElement('span');
@@ -1247,6 +1276,9 @@ function renderCard(site) {
   };
 
   const more = [];
+  if (site.projectId) {
+    more.push({ icon: 'move', label: 'Move to section…', submenu: () => sectionMenuFor(site) });
+  }
   // For a folder that isn't just HTML, "how does this get served" is the first
   // thing anyone needs — it comes before the file-manager actions.
   if (site.kind === 'local' && site.projectId) {
@@ -1319,8 +1351,11 @@ function renderCard(site) {
   if (site.projectId && !site.missing && !command) {
     more.push({ icon: 'home', label: 'Set entry page…', fn: () => openEntry(site) });
   }
+  if (site.projectId && !site.missing) {
+    more.push({ icon: 'present', label: 'Present in ShowCase', fn: () => presentSite(site) });
+  }
   if (site.projectId) {
-    // Audit mode's home is the SiteSlurp menu on the hosted page itself; these
+    // Audit mode's home is the Local Dev Studio menu on the hosted page itself; these
     // stay as the app-side mirror of that toggle.
     if (site.reviewActive) {
       more.push({ icon: 'stop', label: 'End audit mode', fn: async () => {
@@ -1346,7 +1381,7 @@ function renderCard(site) {
     if (!site.missing && !site.attachOnly) {
       more.push({ icon: 'check', label: 'Run audits (accessibility + links)', fn: () => runSiteAudits(site) });
     }
-    // A dev server does its own hot reload — SiteSlurp's file watcher would only
+    // A dev server does its own hot reload — Local Dev Studio's file watcher would only
     // fight it, so the toggle is a static-hosting option.
     if (!command) {
       more.push({ icon: 'refresh', label: site.liveReload ? 'Live reload: on' : 'Live reload: off', fn: async () => {
@@ -1419,9 +1454,9 @@ function renderCard(site) {
   return card;
 }
 
-function visibleSites() {
+function visibleSites({ search = true } = {}) {
   const showRaw = $('#libShowRaw').checked;
-  const needle = state.filter.toLowerCase();
+  const needle = search ? state.filter.toLowerCase() : '';
   let sites = state.library.sites.filter(site => {
     if (!showRaw && site.kind === 'raw' && site.hasExtracted) return false;
     if (!needle) return true;
@@ -1432,6 +1467,308 @@ function visibleSites() {
   else if (sort === 'size') sites = sites.slice().sort((a, b) => b.sizeBytes - a.sizeBytes);
   return sites;
 }
+
+/* ---------- library sections ----------
+   The user's own shelves (client sites, concepts, their own business). A site
+   on none of them falls into one of two built-in groups that can't be renamed
+   or deleted: Captures (other people's sites, pulled in by the Extractor) and
+   Unsorted (folders dropped in and not shelved yet). */
+const GROUP_CAPTURES = '_captures';
+const GROUP_UNSORTED = '_unsorted';
+const BUILT_IN = {
+  [GROUP_CAPTURES]: { name: 'Captures', hint: 'Sites pulled in from the web' },
+  [GROUP_UNSORTED]: { name: 'Unsorted', hint: 'Folders not in a section yet' },
+};
+
+const userSections = () => state.library.sections || [];
+const sectionNamed = id => (userSections().find(s => s.id === id) || BUILT_IN[id] || {}).name || '';
+
+function groupOf(site) {
+  if (site.section && userSections().some(s => s.id === site.section)) return site.section;
+  return site.kind === 'local' ? GROUP_UNSORTED : GROUP_CAPTURES;
+}
+
+/** Every group in display order: the user's sections, then the built-ins. */
+function libraryGroups() {
+  return [
+    ...userSections().map(s => ({ id: s.id, name: s.name, user: true })),
+    ...Object.entries(BUILT_IN).map(([id, g]) => ({ id, ...g, user: false })),
+  ];
+}
+
+function setSection(id) {
+  state.section = id;
+  invoke('settings:set', { libSection: id }).catch(() => {});
+  renderLibrary();
+}
+
+function toggleGroup(id) {
+  if (state.collapsed.has(id)) state.collapsed.delete(id);
+  else state.collapsed.add(id);
+  invoke('settings:set', { collapsedSections: [...state.collapsed] }).catch(() => {});
+  renderLibrary();
+}
+
+/** Put a site on a section (null = back to Captures/Unsorted), with an undo. */
+async function moveToSection(site, sectionId, { undoable = true } = {}) {
+  const from = groupOf(site);
+  const to = sectionId || (site.kind === 'local' ? GROUP_UNSORTED : GROUP_CAPTURES);
+  if (from === to) return;
+  await invoke('project:setSection', { id: site.projectId, section: sectionId });
+  const back = BUILT_IN[from] ? null : from;
+  toast(`Moved "${site.name}" to ${sectionNamed(to)}`, {
+    kind: 'ok',
+    timeout: 4000,
+    action: undoable
+      ? { label: 'Undo', fn: () => moveToSection({ ...site, section: sectionId }, back, { undoable: false }).catch(failed) }
+      : null,
+  });
+  await refreshLibrary();
+}
+
+/** The rows behind a card's "Move to section…". */
+function sectionMenuFor(site) {
+  const here = groupOf(site);
+  const rows = userSections().map(sec => ({
+    icon: here === sec.id ? 'check' : 'folder',
+    label: sec.name,
+    current: here === sec.id,
+    fn: () => moveToSection(site, sec.id),
+  }));
+  // Off its shelf, a site goes back to the built-in group for its kind.
+  if (!BUILT_IN[here]) {
+    const home = site.kind === 'local' ? GROUP_UNSORTED : GROUP_CAPTURES;
+    rows.push({ icon: 'undo', label: `Take out — back to ${BUILT_IN[home].name}`, fn: () => moveToSection(site, null) });
+  }
+  rows.push({ icon: 'plus', label: 'New section…', fn: () => openSectionModal(null, sec => moveToSection(site, sec.id)) });
+  return rows;
+}
+
+/* Drag a card onto a section chip or a section's block to move it. `dragged`
+   is the site in flight; while it is set, background refreshes wait (the card
+   being dragged must not be replaced mid-drag) — same rule as an open ⋯ menu. */
+let dragged = null;
+
+// A capture dropped on Unsorted, or a folder on Captures, would land in the
+// other built-in group — not where the user aimed, so neither takes it.
+function accepts(groupId, site) {
+  if (!site || !site.projectId || groupOf(site) === groupId) return false;
+  if (groupId === GROUP_CAPTURES) return site.kind !== 'local';
+  if (groupId === GROUP_UNSORTED) return site.kind === 'local';
+  return true;
+}
+
+function makeDraggable(card, site) {
+  card.draggable = true;
+  card.addEventListener('dragstart', e => {
+    closeMenu();
+    dragged = site;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', site.name);
+    card.classList.add('dragging');
+    document.body.classList.add('sorting');
+  });
+  card.addEventListener('dragend', () => {
+    dragged = null;
+    card.classList.remove('dragging');
+    document.body.classList.remove('sorting');
+    for (const el of document.querySelectorAll('.drop-over')) el.classList.remove('drop-over');
+    if (pendingRender) { pendingRender = false; renderLibrary(); }
+  });
+}
+
+function dropTarget(el, groupId) {
+  el.addEventListener('dragover', e => {
+    if (!accepts(groupId, dragged)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    el.classList.add('drop-over');
+  });
+  el.addEventListener('dragleave', e => {
+    if (!el.contains(e.relatedTarget)) el.classList.remove('drop-over');
+  });
+  el.addEventListener('drop', e => {
+    if (!accepts(groupId, dragged)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    el.classList.remove('drop-over');
+    const site = dragged;
+    moveToSection(site, BUILT_IN[groupId] ? null : groupId).catch(failed);
+  });
+}
+
+function renderSectionBar(groups, counts, present, total) {
+  const bar = $('#libSections');
+  bar.innerHTML = '';
+  bar.classList.toggle('hidden', !state.library.sites.length);
+  const chip = (id, name, count, target) => {
+    const b = document.createElement('button');
+    const on = state.section === id;
+    b.className = 'sec-chip' + (on ? ' on' : '');
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', String(on));
+    b.innerHTML = '<span class="sec-name"></span><span class="sec-count"></span>';
+    b.querySelector('.sec-name').textContent = name;
+    b.querySelector('.sec-count').textContent = count;
+    b.addEventListener('click', () => setSection(id));
+    if (target) dropTarget(b, id);
+    bar.appendChild(b);
+  };
+  chip('all', 'All', total, false);
+  for (const group of groups) {
+    // A built-in group gets a chip only while something belongs to it.
+    if (!group.user && !present.has(group.id) && state.section !== group.id) continue;
+    chip(group.id, group.name, counts.get(group.id).length, true);
+  }
+  const add = document.createElement('button');
+  add.className = 'sec-add';
+  add.title = 'Add a section to sort the library into';
+  add.innerHTML = '<svg class="icon"><use href="#i-plus"/></svg><span>New section</span>';
+  add.addEventListener('click', () => openSectionModal());
+  bar.appendChild(add);
+}
+
+function renderGroup(group, sites, inAll) {
+  const block = document.createElement('section');
+  block.className = 'lib-group';
+  block.dataset.group = group.id;
+  const folded = inAll && state.collapsed.has(group.id);
+  block.classList.toggle('folded', folded);
+  dropTarget(block, group.id);
+
+  const head = document.createElement('div');
+  head.className = 'group-head';
+  const title = document.createElement(inAll ? 'button' : 'div');
+  title.className = 'group-title';
+  title.innerHTML = (inAll ? '<svg class="icon chevron"><use href="#i-chevron"/></svg>' : '')
+    + '<span class="group-name"></span><span class="lib-count"></span>';
+  title.querySelector('.group-name').textContent = group.name;
+  title.querySelector('.lib-count').textContent = sites.length;
+  if (inAll) {
+    title.setAttribute('aria-expanded', String(!folded));
+    title.title = folded ? 'Show this section' : 'Fold this section away';
+    title.addEventListener('click', () => toggleGroup(group.id));
+  }
+  head.appendChild(title);
+  if (group.hint) {
+    const hint = document.createElement('span');
+    hint.className = 'group-hint';
+    hint.textContent = group.hint;
+    head.appendChild(hint);
+  }
+  const rule = document.createElement('span');
+  rule.className = 'group-rule';
+  head.appendChild(rule);
+  if (group.user) {
+    const actions = document.createElement('div');
+    actions.className = 'group-actions';
+    actions.appendChild(menuButton(() => sectionActions(group), 'Section actions'));
+    head.appendChild(actions);
+  }
+  block.appendChild(head);
+
+  if (sites.length) {
+    const grid = document.createElement('div');
+    grid.className = 'grid';
+    for (const site of sites) grid.appendChild(renderCard(site));
+    block.appendChild(grid);
+  } else {
+    const drop = document.createElement('div');
+    drop.className = 'group-drop';
+    drop.textContent = 'Empty — drag sites here, or use ⋯ → Move to section on any card.';
+    block.appendChild(drop);
+  }
+  return block;
+}
+
+/** The ⋯ on a section's header: rename, reorder, delete. */
+function sectionActions(group) {
+  const list = userSections();
+  const idx = list.findIndex(s => s.id === group.id);
+  const move = offset => async () => {
+    await invoke('section:move', { id: group.id, offset });
+    await refreshLibrary();
+  };
+  const rows = [{ icon: 'edit', label: 'Rename…', fn: () => openSectionModal(list[idx]) }];
+  if (idx > 0) rows.push({ icon: 'arrow-left', label: 'Move earlier', fn: move(-1) });
+  if (idx < list.length - 1) rows.push({ icon: 'arrow-right', label: 'Move later', fn: move(1) });
+  rows.push({ icon: 'trash', label: 'Delete section…', fn: () => deleteSection(list[idx]) });
+  return rows;
+}
+
+async function deleteSection(section) {
+  const inIt = state.library.sites.filter(s => s.section === section.id).length;
+  const yes = await invoke('shell:confirm', {
+    title: 'Delete section',
+    message: `Delete the "${section.name}" section?`,
+    detail: inIt
+      ? `The ${inIt} site${inIt === 1 ? '' : 's'} in it go back to Unsorted or Captures. Nothing on disk is touched.`
+      : 'It is empty. Nothing on disk is touched.',
+    confirmLabel: 'Delete',
+  });
+  if (!yes) return;
+  await invoke('section:remove', { id: section.id });
+  state.collapsed.delete(section.id);
+  if (state.section === section.id) setSection('all');
+  toast(`Deleted "${section.name}"`, { kind: 'ok', timeout: 3000 });
+  await refreshLibrary();
+}
+
+/* The section-name dialog: new (optionally followed by `then`, e.g. moving the
+   card that asked for it) or rename. */
+const sectionModal = { editing: null, then: null };
+
+function openSectionModal(section = null, then = null) {
+  sectionModal.editing = section;
+  sectionModal.then = then;
+  $('#sectionTitle').textContent = section ? 'Rename section' : 'New section';
+  $('#sectionSave').textContent = section ? 'Rename' : 'Create section';
+  $('#sectionName').value = section ? section.name : '';
+  $('#sectionModal').classList.remove('hidden');
+  $('#sectionName').focus();
+  $('#sectionName').select();
+}
+
+$('#sectionCancel').addEventListener('click', () => $('#sectionModal').classList.add('hidden'));
+$('#sectionName').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#sectionSave').click(); }
+});
+$('#sectionSave').addEventListener('click', async () => {
+  const button = $('#sectionSave');
+  const { editing, then } = sectionModal;
+  const name = $('#sectionName').value.trim();
+  button.disabled = true;
+  try {
+    const saved = editing
+      ? await invoke('section:rename', { id: editing.id, name })
+      : await invoke('section:create', { name });
+    $('#sectionModal').classList.add('hidden');
+    if (then) {
+      await refreshLibrary();
+      await then(saved);
+    } else {
+      if (!editing) toast(`Added "${saved.name}" — drag cards onto it to sort them`, { kind: 'ok', timeout: 4000 });
+      await refreshLibrary();
+    }
+  } catch (err) {
+    failed(err);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+/* Until the first folder is dropped in, a popup says that's how. Dismissing
+   it holds for this session; a dropped folder retires it for good. */
+function updateDropTip() {
+  const dropped = state.library.sites.some(s => s.kind === 'local' && !s.attachOnly);
+  const show = state.libraryLoaded && !dropped && !state.dropTipDismissed && state.tab !== 'showcase';
+  $('#dropTip').classList.toggle('hidden', !show);
+}
+$('#dropTipClose').addEventListener('click', () => {
+  state.dropTipDismissed = true;
+  updateDropTip();
+});
 
 /* The Extractor tab's own short list: the last few things this app produced,
    with the one action each of them is waiting for. Local folders belong to
@@ -1491,21 +1828,49 @@ function renderRecent() {
 }
 
 function renderLibrary() {
-  // Don't re-render out from under an open menu — hold it until the menu closes.
-  if (openMenu) { pendingRender = true; return; }
+  // Don't re-render out from under an open menu or a card mid-drag — hold it
+  // until the menu closes or the drag ends.
+  if (openMenu || dragged) { pendingRender = true; return; }
   const sites = visibleSites();
-  const grid = $('#grid');
-  grid.innerHTML = '';
-  for (const site of sites) grid.appendChild(renderCard(site));
+  const groups = libraryGroups();
+  if (state.section !== 'all' && !groups.some(g => g.id === state.section)) state.section = 'all';
+  const counts = new Map(groups.map(g => [g.id, []]));
+  for (const site of sites) counts.get(groupOf(site)).push(site);
+  // Which built-in groups hold anything at all, search aside — so their chips
+  // don't blink in and out while the user types in the filter.
+  const present = new Set(visibleSites({ search: false }).map(groupOf));
+  renderSectionBar(groups, counts, present, sites.length);
+
+  const inAll = state.section === 'all';
+  const searching = !!state.filter;
+  const wrap = $('#libGroups');
+  wrap.innerHTML = '';
+  let shownSites = 0;
+  if (state.library.sites.length) {
+    for (const group of inAll ? groups : groups.filter(g => g.id === state.section)) {
+      const list = counts.get(group.id);
+      // Built-in groups only show while something is in them. An empty section
+      // of the user's own stays up as a place to drop cards — unless a search
+      // is narrowing things, when an empty shelf is only noise.
+      if (!list.length && (!group.user || searching)) continue;
+      wrap.appendChild(renderGroup(group, list, inAll));
+      shownSites += list.length;
+    }
+  }
 
   const empty = $('#empty');
-  empty.classList.toggle('hidden', sites.length > 0);
-  if (!sites.length) {
+  const nothing = !wrap.children.length;
+  empty.classList.toggle('hidden', !nothing);
+  if (nothing) {
     empty.innerHTML = '';
     const line = document.createElement('p');
-    line.textContent = state.library.sites.length
-      ? 'Nothing matches that filter.'
-      : 'Nothing here yet — capture a site in the Extractor tab, or drop a folder to add your own.';
+    line.textContent = !state.library.sites.length
+      ? 'Nothing here yet — capture a site in the Extractor tab, or drop a folder to add your own.'
+      : inAll
+        ? 'Nothing matches that filter.'
+        : searching
+          ? `Nothing in ${sectionNamed(state.section)} matches that filter.`
+          : `Nothing in ${sectionNamed(state.section)} yet.`;
     empty.appendChild(line);
     if (!state.library.sites.length) {
       const attach = document.createElement('button');
@@ -1517,7 +1882,9 @@ function renderLibrary() {
       empty.appendChild(attach);
     }
   }
-  $('#libCount').textContent = sites.length || '';
+  $('#libCount').textContent = shownSites || '';
+  updateDropTip();
+  renderShowcasePicker();
 
   const hosted = state.library.sites.filter(s => s.port);
   $('#tabStudioCount').textContent = state.library.sites.length || '';
@@ -1543,6 +1910,7 @@ function renderLibrary() {
 async function refreshLibrary() {
   try {
     state.library = await invoke('library:list');
+    state.libraryLoaded = true;
   } catch (err) {
     failed(err);
     return;
@@ -1596,7 +1964,7 @@ async function renderReviewHistory(site) {
   const list = $('#historyList');
   list.innerHTML = '';
   if (!reviews.length) {
-    list.innerHTML = '<div class="history-empty">No audits yet — host the site and flip on Audit mode from the SiteSlurp menu on the page.</div>';
+    list.innerHTML = '<div class="history-empty">No audits yet — host the site and flip on Audit mode from the Local Dev Studio menu on the page.</div>';
   }
   for (const review of reviews) {
     const row = document.createElement('div');
@@ -2138,7 +2506,7 @@ $('#entryClose').addEventListener('click', () => $('#entryModal').classList.add(
 
 /* ---------- runtime: how a project gets served ----------
    A folder of HTML is served straight off disk, everything else needs a
-   process. This panel is where that choice lives: what SiteSlurp detected,
+   process. This panel is where that choice lives: what Local Dev Studio detected,
    what it will actually run, and — while the site is hosted — what that
    process is saying. */
 const rt = { site: null, list: [], timer: null, capturing: false };
@@ -2496,10 +2864,14 @@ function allCommands() {
       fn: () => { setTab('extractor'); $('#btnLogin').click(); } },
     { group: 'view', icon: 'unpack', label: 'Go to Extractor', keys: 'Ctrl 1', fn: () => setTab('extractor') },
     { group: 'view', icon: 'map', label: 'Go to Studio', keys: 'Ctrl 2', fn: () => setTab('studio') },
+    { group: 'view', icon: 'present', label: 'Go to ShowCase', keys: 'Ctrl 3', fn: () => setTab('showcase') },
     { group: 'library', icon: 'refresh', label: 'Refresh library', keys: 'F5', fn: refreshLibrary },
     { group: 'library', icon: 'search', label: 'Filter the library', keys: '/',
       fn: () => { setTab('studio'); $('#libSearch').focus(); } },
     { group: 'library', icon: 'folder', label: 'Open captures folder', fn: winAction('capturesFolder') },
+    { group: 'library', icon: 'plus', label: 'New library section…', fn: () => { setTab('studio'); openSectionModal(); } },
+    ...libraryGroups().map(g => ({ group: 'library', icon: 'layers', label: `Show ${g.name}`,
+      fn: () => { setTab('studio'); setSection(g.id); } })),
     { group: 'studio', icon: 'plug', label: 'Attach to a dev server…', fn: openAttach },
   ];
 
@@ -2524,6 +2896,8 @@ function allCommands() {
     if (site.projectId) {
       list.push({ group: 'sites', icon: 'monitor', label: `Open ${site.name} in Studio Browser`,
         fn: () => openStudioBrowser(site) });
+      list.push({ group: 'sites', icon: 'present', label: `Present ${site.name} in ShowCase`,
+        fn: () => presentSite(site) });
       if (!site.missing && !site.attachOnly) {
         list.push({ group: 'sites', icon: 'check', label: `Run audits on ${site.name}`,
           fn: () => runSiteAudits(site) });
@@ -2541,6 +2915,11 @@ function allCommands() {
       }
     }
   }
+  if (sc.live.active) {
+    list.push({ group: 'showcase', icon: sc.live.playing ? 'pause' : 'play',
+      label: sc.live.playing ? 'ShowCase: pause' : 'ShowCase: resume', fn: () => scControl('toggle') });
+    list.push({ group: 'showcase', icon: 'stop', label: 'ShowCase: end the show', fn: () => scControl('close') });
+  }
   if (state.library.sites.some(s => s.port)) {
     list.push({ group: 'sites', icon: 'power', label: 'Stop all local servers',
       fn: async () => { await invoke('host:stopAll').catch(failed); await refreshLibrary(); } });
@@ -2555,7 +2934,7 @@ function allCommands() {
     { group: 'app', icon: 'star', label: 'Calibration — taste memory', fn: openCalibration },
     { group: 'app', icon: 'note', label: 'View log', fn: openLogViewer },
     { group: 'app', icon: 'note', label: 'Open log file', fn: () => invoke('open:log').catch(failed) },
-    { group: 'app', icon: 'info', label: 'About SiteSlurp Studio', fn: openAbout },
+    { group: 'app', icon: 'info', label: 'About Local Dev Studio', fn: openAbout },
     { group: 'view', icon: 'zoom-in', label: 'Zoom in', keys: 'Ctrl +', fn: winAction('zoomIn') },
     { group: 'view', icon: 'zoom-out', label: 'Zoom out', keys: 'Ctrl −', fn: winAction('zoomOut') },
     { group: 'view', icon: 'search', label: 'Reset zoom', keys: 'Ctrl 0', fn: winAction('zoomReset') },
@@ -2637,7 +3016,7 @@ window.snap.on('env:changed', () => refreshEnv());
 // The updater downloaded a new version in the background. Installing is the
 // user's call — this toast is the only nudge, and it stays until acted on.
 window.snap.on('update:ready', ({ version }) => {
-  toast(`SiteSlurp ${version} is downloaded and ready`, {
+  toast(`Local Dev Studio ${version} is downloaded and ready`, {
     kind: 'ok', timeout: 0,
     action: { label: 'Restart to update', fn: () => invoke('update:install').catch(failed) },
   });
@@ -2647,7 +3026,7 @@ window.snap.on('update:ready', ({ version }) => {
 // drift apart (they used to — Share/Publish/Runtime were missing from one list
 // or the other, leaving them closeable only by their Cancel button).
 const MODAL_IDS = ['cmdModal', 'settingsModal', 'doctorModal', 'aboutModal', 'historyModal', 'runtimeModal',
-  'calibrationModal', 'logModal', 'entryModal', 'snapModal', 'attachModal', 'batchModal',
+  'calibrationModal', 'logModal', 'entryModal', 'snapModal', 'sectionModal', 'attachModal', 'batchModal',
   'shareModal'];
 
 document.addEventListener('keydown', e => {
@@ -2665,9 +3044,9 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.key === 'Enter' && !$('#settingsModal').classList.contains('hidden')) $('#setSave').click();
-  if ((e.ctrlKey || e.metaKey) && (e.key === '1' || e.key === '2')) {
+  if ((e.ctrlKey || e.metaKey) && (e.key === '1' || e.key === '2' || e.key === '3')) {
     e.preventDefault();
-    setTab(e.key === '1' ? 'extractor' : 'studio');
+    setTab(TABS[Number(e.key) - 1]);
   }
   if (e.key === '/' && document.activeElement === document.body) {
     e.preventDefault();
@@ -2681,6 +3060,399 @@ for (const id of MODAL_IDS) {
   document.getElementById(id).addEventListener('click', e => {
     if (e.target.id === id) e.target.classList.add('hidden');
   });
+}
+
+/* ---------- ShowCase ----------
+   The picker mirrors the library (projects only — a raw snapshot has nothing
+   to present); the director panel holds the options, remembered in settings;
+   the remote is the same column's other face while a show is on. Every
+   control on the remote is one of the show's own keys, so the laptop can
+   drive a projector without touching it. The storyboard the show built for
+   the current page is listed on the remote; any shot is one click away. */
+const SC_DEFAULTS = {
+  style: 'walkthrough', speed: 90, sections: true, dwell: 2.5, pageDwell: 4, loop: true,
+  nav: true, buttons: true, details: true, cards: true, flip: false, pages: true,
+  tidy: true, reveal: true, media: true,
+  frame: 'none', cursor: 'ghost', zoom: 100, slates: true, tagline: '', progress: true,
+  captions: true, siteSeconds: 0, fullscreen: true, display: null,
+  record: false, music: '', musicVolume: 60,
+};
+// What each style switches on when chosen (mirrors STYLE_BEATS in lib/showcase.js).
+const SC_STYLE_BEATS = {
+  walkthrough: { nav: true, buttons: true, details: true, cards: true, flip: false, pages: true },
+  reel: { nav: false, buttons: false, details: true, cards: false, flip: true, pages: false },
+  cinematic: { nav: false, buttons: false, details: true, cards: false, flip: false, pages: true },
+  scroll: { nav: false, buttons: false, details: false, cards: false, flip: false, pages: false },
+  still: { nav: false, buttons: false, details: false, cards: false, flip: false, pages: true },
+};
+const SC_STYLE_HINT = {
+  walkthrough: 'Every section, the navigation, the buttons, then the next page. A client presentation.',
+  reel: 'Opening, a few highlights, a flip to the phone, next site. Thirty seconds each — made for socials.',
+  cinematic: 'Slow glides and long push-ins, no pointer. Let the design speak.',
+  scroll: 'One steady glide down the page, stopping at sections. Nothing else moves.',
+  still: 'No motion. Hold each page for a while, then move on.',
+};
+const SC_SHOT_ICON = {
+  establish: '◦', nav: '⋯', button: '◉', glide: '↓', detail: '⊕', cards: '⋮', wander: '✦', flip: '▯', hold: '■',
+};
+const sc = { picked: [], opts: { ...SC_DEFAULTS }, live: { active: false }, saveTimer: 0, toldRecording: '' };
+
+const scPresentable = () => state.library.sites.filter(s => s.projectId && !s.missing && s.kind !== 'raw');
+
+function segSet(el, value) {
+  for (const b of el.querySelectorAll('button')) b.classList.toggle('on', b.dataset.v === String(value));
+}
+function segBind(el, fn) {
+  el.addEventListener('click', e => {
+    const b = e.target.closest('button[data-v]');
+    if (!b) return;
+    segSet(el, b.dataset.v);
+    fn(b.dataset.v);
+  });
+}
+
+function renderShowcasePicker() {
+  const sites = scPresentable();
+  const ids = new Set(sites.map(s => s.projectId));
+  sc.picked = sc.picked.filter(id => ids.has(id));
+  const grid = $('#scGrid');
+  grid.innerHTML = '';
+  for (const site of sites) {
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'sc-tile';
+    const at = sc.picked.indexOf(site.projectId);
+    if (at >= 0) tile.classList.add('on');
+    tile.title = at >= 0 ? 'Click to drop it from the show' : 'Click to present this site';
+    const thumb = document.createElement('div');
+    thumb.className = 'thumb';
+    if (site.thumb) {
+      const img = document.createElement('img');
+      img.src = site.thumb;
+      img.loading = 'lazy';
+      img.alt = '';
+      thumb.appendChild(img);
+    } else {
+      const letter = document.createElement('span');
+      letter.className = 'letter';
+      letter.textContent = site.name.slice(0, 2);
+      thumb.appendChild(letter);
+    }
+    if (site.port) {
+      const badge = document.createElement('span');
+      badge.className = 'badge live';
+      badge.textContent = 'live';
+      thumb.appendChild(badge);
+    }
+    const order = document.createElement('span');
+    order.className = 'sc-tile-order';
+    order.textContent = at >= 0 ? String(at + 1) : '';
+    thumb.appendChild(order);
+    tile.appendChild(thumb);
+    const name = document.createElement('span');
+    name.className = 'sc-tile-name';
+    name.textContent = site.name;
+    tile.appendChild(name);
+    tile.addEventListener('click', () => {
+      const i = sc.picked.indexOf(site.projectId);
+      if (i >= 0) sc.picked.splice(i, 1); else sc.picked.push(site.projectId);
+      renderShowcasePicker();
+    });
+    grid.appendChild(tile);
+  }
+  $('#scEmpty').classList.toggle('hidden', sites.length > 0);
+  const n = sc.picked.length;
+  $('#scPickCount').textContent = n ? (n === 1 ? '1 site' : `${n} sites · reel`) : '';
+  $('#scClear').classList.toggle('hidden', n === 0);
+  $('#scReelGroup').classList.toggle('hidden', n < 2);
+  const present = $('#scPresent');
+  present.disabled = n === 0;
+  present.textContent = n > 1 ? `Present reel (${n})` : (sc.opts.record ? 'Present & record' : 'Present');
+}
+$('#scClear').addEventListener('click', () => { sc.picked = []; renderShowcasePicker(); });
+
+/** "Present in ShowCase" from a card or the palette: this site, on its own. */
+function presentSite(site) {
+  sc.picked = [site.projectId];
+  renderShowcasePicker();
+  setTab('showcase');
+  $('#scPresent').focus();
+}
+
+function scSave() {
+  clearTimeout(sc.saveTimer);
+  sc.saveTimer = setTimeout(() => invoke('settings:set', { showcase: sc.opts }).catch(() => {}), 400);
+}
+
+const scMusicLabel = p => (p ? String(p).split(/[\\/]/).pop() : 'No music');
+
+/** Options → controls. */
+function scApply() {
+  const o = sc.opts;
+  segSet($('#scStyle'), o.style);
+  $('#scStyleHint').textContent = SC_STYLE_HINT[o.style] || '';
+  $('#scSpeed').value = o.speed;
+  $('#scSpeedValue').textContent = `${o.speed} px/s`;
+  const still = o.style === 'still';
+  $('#scSpeedGroup').classList.toggle('off', still);
+  $('#scBeatsGroup').classList.toggle('off', still);
+  $('#scSectionsGroup').classList.toggle('off', still);
+  for (const key of ['nav', 'buttons', 'details', 'cards', 'flip', 'pages', 'tidy', 'reveal', 'media']) {
+    $('#sc' + key[0].toUpperCase() + key.slice(1)).checked = !!o[key];
+  }
+  $('#scSections').checked = o.sections;
+  $('#scDwell').value = String(o.dwell);
+  $('#scPageDwell').value = String(o.pageDwell);
+  $('#scLoop').checked = o.loop;
+  segSet($('#scFrame'), o.frame);
+  segSet($('#scCursor'), o.cursor);
+  $('#scZoom').value = String(o.zoom);
+  $('#scSlates').checked = o.slates;
+  $('#scTagline').value = o.tagline;
+  $('#scProgress').checked = o.progress;
+  $('#scCaptions').checked = o.captions;
+  $('#scSiteSeconds').value = String(o.siteSeconds);
+  $('#scRecord').checked = o.record;
+  $('#scMusicName').textContent = scMusicLabel(o.music);
+  $('#scMusicName').title = o.music || '';
+  $('#scMusicClear').classList.toggle('hidden', !o.music);
+  $('#scMusicVolumeRow').classList.toggle('hidden', !o.music);
+  $('#scMusicVolume').value = String(o.musicVolume);
+  $('#scFullscreen').checked = o.fullscreen;
+  $('#scDisplay').value = o.display === null ? '' : String(o.display);
+  if ($('#scDisplay').selectedIndex < 0) $('#scDisplay').value = '';
+  renderShowcasePicker();
+}
+
+function scBind() {
+  const num = (id, key) => $(id).addEventListener('change', e => { sc.opts[key] = Number(e.target.value); scSave(); });
+  const bool = (id, key) => $(id).addEventListener('change', e => { sc.opts[key] = e.target.checked; scSave(); });
+  segBind($('#scStyle'), v => {
+    sc.opts.style = v;
+    Object.assign(sc.opts, SC_STYLE_BEATS[v] || {});
+    if (v === 'reel' && sc.picked.length > 1 && !sc.opts.siteSeconds) sc.opts.siteSeconds = 30;
+    scApply();
+    scSave();
+  });
+  $('#scSpeed').addEventListener('input', e => {
+    sc.opts.speed = Number(e.target.value);
+    $('#scSpeedValue').textContent = `${sc.opts.speed} px/s`;
+    scSave();
+    if (sc.live.active) scControl('speed', sc.opts.speed);
+  });
+  for (const key of ['nav', 'buttons', 'details', 'cards', 'flip', 'pages', 'tidy', 'reveal', 'media']) {
+    bool('#sc' + key[0].toUpperCase() + key.slice(1), key);
+  }
+  bool('#scSections', 'sections');
+  num('#scDwell', 'dwell');
+  num('#scPageDwell', 'pageDwell');
+  bool('#scLoop', 'loop');
+  segBind($('#scFrame'), v => { sc.opts.frame = v; scSave(); });
+  segBind($('#scCursor'), v => { sc.opts.cursor = v; scSave(); });
+  num('#scZoom', 'zoom');
+  bool('#scSlates', 'slates');
+  $('#scTagline').addEventListener('input', e => { sc.opts.tagline = e.target.value.slice(0, 160); scSave(); });
+  bool('#scProgress', 'progress');
+  bool('#scCaptions', 'captions');
+  num('#scSiteSeconds', 'siteSeconds');
+  $('#scRecord').addEventListener('change', e => { sc.opts.record = e.target.checked; renderShowcasePicker(); scSave(); });
+  $('#scMusic').addEventListener('click', async () => {
+    try {
+      const file = await invoke('showcase:pickMusic');
+      if (!file) return;
+      sc.opts.music = file;
+      scApply();
+      scSave();
+    } catch (err) { failed(err); }
+  });
+  $('#scMusicClear').addEventListener('click', () => { sc.opts.music = ''; scApply(); scSave(); });
+  num('#scMusicVolume', 'musicVolume');
+  bool('#scFullscreen', 'fullscreen');
+  $('#scDisplay').addEventListener('change', e => {
+    sc.opts.display = e.target.value === '' ? null : Number(e.target.value);
+    scSave();
+  });
+
+  $('#scPresent').addEventListener('click', async () => {
+    if (!sc.picked.length) return;
+    const b = $('#scPresent');
+    b.disabled = true;
+    try {
+      scRender(await invoke('showcase:start', { ids: sc.picked, options: sc.opts }));
+    } catch (err) {
+      failed(err);
+    } finally {
+      b.disabled = sc.picked.length === 0;
+    }
+  });
+
+  // The remote.
+  $('#scPlay').addEventListener('click', () => scControl('toggle'));
+  $('#scPrev').addEventListener('click', () => scControl('prev'));
+  $('#scNext').addEventListener('click', () => scControl('next'));
+  $('#scPrevPage').addEventListener('click', () => scControl('prevPage'));
+  $('#scNextPage').addEventListener('click', () => scControl('nextPage'));
+  $('#scSlower').addEventListener('click', () => scControl('speed', Math.max(10, (sc.live.speed || 90) - 20)));
+  $('#scFaster').addEventListener('click', () => scControl('speed', Math.min(800, (sc.live.speed || 90) + 20)));
+  segBind($('#scRemoteFrame'), v => scControl('frame', v));
+  segBind($('#scRemoteCursor'), v => scControl('cursor', v));
+  $('#scBlack').addEventListener('click', () => scControl('blackout'));
+  $('#scFull').addEventListener('click', () => scControl('fullscreen'));
+  $('#scRestart').addEventListener('click', () => scControl('restart'));
+  $('#scRecordBtn').addEventListener('click', () => scControl('record'));
+  $('#scRemoteFocus').addEventListener('click', () => scControl('focus'));
+  $('#scEnd').addEventListener('click', () => scControl('close'));
+  $('#scBoard').addEventListener('click', e => {
+    const b = e.target.closest('button[data-shot]');
+    if (b) scControl('shot', Number(b.dataset.shot));
+  });
+}
+
+async function scControl(action, value) {
+  try {
+    scRender(await invoke('showcase:control', { action, value }));
+  } catch (err) { failed(err); }
+}
+
+async function scFillDisplays() {
+  const pick = $('#scDisplay');
+  pick.innerHTML = '';
+  const same = document.createElement('option');
+  same.value = '';
+  same.textContent = 'Same screen as this window';
+  pick.appendChild(same);
+  let displays = [];
+  try { displays = await invoke('showcase:displays'); } catch { /* single screen, then */ }
+  for (const d of displays) {
+    const opt = document.createElement('option');
+    opt.value = String(d.id);
+    opt.textContent = `${d.label} · ${d.width}×${d.height}${d.primary ? ' · main' : ''}`;
+    pick.appendChild(opt);
+  }
+  pick.value = sc.opts.display === null ? '' : String(sc.opts.display);
+  if (pick.selectedIndex < 0) pick.value = '';
+}
+
+/** A finished recording gets one toast, with the way to it. */
+function scTellRecording(rec) {
+  if (!rec) return;
+  if (rec.error) {
+    if (sc.toldRecording !== 'err:' + rec.error) { sc.toldRecording = 'err:' + rec.error; toast(`Recording failed: ${rec.error}`, { kind: 'err', timeout: 9000 }); }
+    return;
+  }
+  if (!rec.path || sc.toldRecording === rec.path) return;
+  sc.toldRecording = rec.path;
+  const name = rec.path.split(/[\\/]/).pop();
+  toast(`Recording saved · ${name} (${fileSize(rec.bytes)}, ${rec.seconds}s)`, {
+    kind: 'ok', timeout: 12000,
+    action: { label: 'Show in folder', fn: () => invoke('showcase:revealRecording', { file: rec.path }).catch(failed) },
+  });
+}
+
+/** Show state → the remote (or back to the director when it's over). */
+function scRender(live) {
+  sc.live = live && typeof live === 'object' ? live : { active: false };
+  const on = !!sc.live.active;
+  $('#scDirector').classList.toggle('hidden', on);
+  $('#scRemote').classList.toggle('hidden', !on);
+  $('#tab-showcase').classList.toggle('busy', on);
+  scTellRecording(sc.live.lastRecording);
+  if (!on) return;
+  const s = sc.live;
+  $('#scNowSite').textContent = s.site ? s.site.name : '';
+  let page = '';
+  if (s.phase === 'slate') page = 'Title card…';
+  else if (s.phase === 'end') page = 'Finished — play to run it again';
+  else if (s.busy) page = 'Moving to the next page…';
+  else {
+    const shot = s.board && s.shot >= 0 && s.board[s.shot];
+    page = shot ? shot.label : (s.page && (s.page.title || s.page.label)) || '';
+    if (s.fixed && (s.fixed.reveal || s.fixed.hidden)) {
+      const bits = [];
+      if (s.fixed.reveal) bits.push(`${s.fixed.reveal} revealed`);
+      if (s.fixed.hidden) bits.push(`${s.fixed.hidden} tidied`);
+      page += ` · ${bits.join(', ')}`;
+    }
+  }
+  $('#scNowPage').textContent = page;
+  $('#scProgressBar').style.width = `${Math.round((s.progress || 0) * 100)}%`;
+  const play = $('#scPlay');
+  const playing = s.playing && s.phase !== 'end';
+  play.querySelector('use').setAttribute('href', playing ? '#i-pause' : '#i-play');
+  play.querySelector('span').textContent = playing ? 'Pause' : (s.phase === 'end' ? 'Again' : 'Play');
+  $('#scRemoteSpeedValue').textContent = s.style === 'still' ? 'held' : `${s.speed} px/s`;
+  segSet($('#scRemoteFrame'), s.frame);
+  segSet($('#scRemoteCursor'), s.cursor);
+  $('#scBlack').classList.toggle('on', !!s.blackout);
+  $('#scFull').classList.toggle('on', !!s.fullscreen);
+  $('#scRecordBtn').classList.toggle('on', !!s.recording);
+  $('#scRecordBtn').textContent = s.recording ? `Recording ${s.recording.seconds}s` : 'Record';
+  $('#scRec').classList.toggle('hidden', !s.recording);
+  // Pages.
+  const pages = s.page && s.page.count > 1;
+  $('#scPageRow').classList.toggle('hidden', !pages);
+  if (pages) $('#scPageCount').textContent = `Page ${s.page.index + 1} of ${s.page.count}${s.page.label ? ' · ' + s.page.label : ''}`;
+  // The storyboard.
+  const board = $('#scBoard');
+  const key = (s.board || []).map(b => b.kind + b.label).join('|');
+  if (board.dataset.key !== key) {
+    board.dataset.key = key;
+    board.innerHTML = '';
+    (s.board || []).forEach((shot, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'sc-shot';
+      b.dataset.shot = String(i);
+      b.title = 'Jump to this shot';
+      const ic = document.createElement('span');
+      ic.className = 'ic';
+      ic.textContent = SC_SHOT_ICON[shot.kind] || '·';
+      b.appendChild(ic);
+      b.append(shot.label);
+      board.appendChild(b);
+    });
+  }
+  board.classList.toggle('hidden', !(s.board && s.board.length));
+  for (const b of board.querySelectorAll('.sc-shot')) {
+    const i = Number(b.dataset.shot);
+    b.classList.toggle('on', i === s.shot);
+    b.classList.toggle('done', i < s.shot);
+  }
+  const current = board.querySelector('.sc-shot.on');
+  if (current) current.scrollIntoView({ block: 'nearest' });
+  // Sites of a reel.
+  const sitesBox = $('#scRemoteSites');
+  sitesBox.classList.toggle('hidden', !(s.sites && s.sites.length > 1));
+  if (s.sites && s.sites.length > 1) {
+    sitesBox.innerHTML = '';
+    const list = document.createElement('div');
+    list.className = 'sc-sites';
+    s.sites.forEach((site, i) => {
+      const b = document.createElement('button');
+      b.className = 'sc-site-btn' + (i === s.siteIndex ? ' on' : '');
+      const n = document.createElement('span');
+      n.className = 'n';
+      n.textContent = String(i + 1);
+      b.appendChild(n);
+      b.append(site.name);
+      b.addEventListener('click', () => scControl('site', i));
+      list.appendChild(b);
+    });
+    sitesBox.appendChild(list);
+  }
+}
+window.snap.on('showcase:state', scRender);
+
+async function initShowcase(settings) {
+  const saved = settings.showcase && typeof settings.showcase === 'object' ? settings.showcase : {};
+  sc.opts = { ...SC_DEFAULTS, ...saved };
+  // A panel saved by 2.7.0 called the style "mode".
+  if (!saved.style && saved.mode) sc.opts.style = { scroll: 'scroll', tour: 'walkthrough', still: 'still' }[saved.mode] || 'walkthrough';
+  delete sc.opts.mode;
+  scBind();
+  await scFillDisplays();
+  scApply();
+  scRender(await invoke('showcase:state').catch(() => ({ active: false })));
 }
 
 /* ---------- window controls fallback ----------
@@ -2721,7 +3493,10 @@ function ensureWindowControls() {
     applyRememberedOptions(settings);
     $('#libSort').value = settings.sort;
     $('#libShowRaw').checked = settings.showRaw;
+    state.section = settings.libSection || 'all';
+    state.collapsed = new Set(settings.collapsedSections || []);
     setTab(settings.tab, { persist: false });
+    await initShowcase(settings);
     await refreshLibrary();
     if (!settings.seenWelcome) {
       openDoctor(true);

@@ -22,6 +22,7 @@ const BROWSER_GLOBALS = {
   ResizeObserver: 'readonly', FileReader: 'readonly',
   self: 'readonly', addEventListener: 'readonly',
   CSSRule: 'readonly', Element: 'readonly',
+  MutationObserver: 'readonly', IntersectionObserver: 'readonly', MediaRecorder: 'readonly', performance: 'readonly', cancelAnimationFrame: 'readonly',
 };
 
 export default [

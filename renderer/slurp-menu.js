@@ -1,7 +1,7 @@
-// renderer/slurp-menu.js — the SiteSlurp menu, injected into every locally
+// renderer/slurp-menu.js — the Local Dev Studio menu, injected into every locally
 // hosted page at serve time.
 //
-// One quiet button in the corner of a hosted site, wearing the SiteSlurp mark.
+// One quiet button in the corner of a hosted site, wearing the Local Dev Studio mark.
 // It opens a small mod menu where the in-page tools live as toggles: the asset
 // dragger (drag any element or file off the page) and audit mode (annotate the
 // page and export a spec). Everything renders in a shadow root so the page's
@@ -190,8 +190,8 @@
 
   const fab = el('button', 'fab');
   fab.type = 'button';
-  fab.title = 'SiteSlurp menu';
-  fab.setAttribute('aria-label', 'SiteSlurp menu');
+  fab.title = 'Local Dev Studio menu';
+  fab.setAttribute('aria-label', 'Local Dev Studio menu');
   const logo = document.createElement('img');
   logo.src = API + 'logo.png';
   logo.alt = '';
@@ -204,7 +204,7 @@
   headLogo.src = API + 'logo.png';
   headLogo.alt = '';
   head.appendChild(headLogo);
-  head.appendChild(el('span', 'word', 'SiteSlurp'));
+  head.appendChild(el('span', 'word', 'Local Dev Studio'));
   head.appendChild(el('span', 'site', CFG.name || location.host));
   panel.appendChild(head);
 

@@ -1,0 +1,218 @@
+/* ShowCase stage — the black around the site. Self-contained (no style.css):
+   a presentation window has none of the app's chrome, and it must paint the
+   same on a projector as on the laptop. */
+:root {
+  --void: #000;
+  --white: #fff;
+  --gray: #A8A8B0;
+  --dim: #78787F;
+  --mono: ui-monospace, "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  --e: cubic-bezier(.22, .9, .28, 1);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; background: var(--void); overflow: hidden; }
+.stage-body {
+  color: var(--gray);
+  font: 14px/1.5 "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  cursor: none;
+  user-select: none;
+}
+.hidden { display: none !important; }
+
+.stage {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 50% 30%, rgba(255, 255, 255, .045), transparent 62%),
+    var(--void);
+}
+
+/* ---------- device bezels ----------
+   Positioned by the main process around the view's rectangle: the bezel box
+   is the view box plus a border, so the site sits in the "screen". */
+.bezel {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, .16);
+  background: #0E0E10;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, .9),
+    0 40px 120px rgba(0, 0, 0, .75),
+    inset 0 0 0 1px rgba(255, 255, 255, .04);
+  transition: left .3s var(--e), top .3s var(--e), width .3s var(--e), height .3s var(--e), border-radius .3s var(--e);
+}
+/* A push-in moves the bezel every frame; the transition would lag behind. */
+.bezel.moving { transition: none; }
+.bezel-notch, .bezel-base { display: none; position: absolute; }
+
+.bezel.phone { border-radius: calc(var(--s, 1) * 52px); padding: 0; }
+.bezel.phone .bezel-notch {
+  display: block;
+  left: 50%;
+  top: calc(var(--s, 1) * 12px);
+  width: calc(var(--s, 1) * 120px);
+  height: calc(var(--s, 1) * 34px);
+  transform: translateX(-50%);
+  background: #000;
+  border-radius: 999px;
+  z-index: 2;
+}
+
+.bezel.tablet { border-radius: calc(var(--s, 1) * 34px); }
+
+.bezel.laptop { border-radius: calc(var(--s, 1) * 16px) calc(var(--s, 1) * 16px) 0 0; }
+.bezel.laptop .bezel-base {
+  display: block;
+  left: -6%;
+  right: -6%;
+  top: 100%;
+  height: calc(var(--s, 1) * 22px);
+  background: linear-gradient(#232327, #151517);
+  border-radius: 0 0 calc(var(--s, 1) * 18px) calc(var(--s, 1) * 18px);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-top: none;
+  box-shadow: 0 30px 60px rgba(0, 0, 0, .6);
+}
+.bezel.laptop .bezel-base::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 18%;
+  height: 35%;
+  transform: translateX(-50%);
+  background: #0B0B0C;
+  border-radius: 0 0 8px 8px;
+}
+
+/* ---------- title / end cards ---------- */
+.slate {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--void);
+  z-index: 5;
+  animation: slate-in .6s var(--e);
+}
+@keyframes slate-in { from { opacity: 0; } }
+.slate.leaving { animation: slate-out .5s var(--e) forwards; }
+@keyframes slate-out { to { opacity: 0; } }
+.slate-inner {
+  text-align: center;
+  max-width: min(76vw, 1100px);
+  animation: rise .8s var(--e);
+}
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+.slate-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: clamp(18px, 3vh, 34px);
+  color: var(--white);
+  font-size: clamp(13px, 1.3vw, 18px);
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+.slate-brand img { width: clamp(24px, 2.2vw, 34px); height: clamp(24px, 2.2vw, 34px); border-radius: 30%; }
+.slate-eyebrow {
+  color: var(--dim);
+  font-weight: 500;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  font-size: .72em;
+  margin-left: 4px;
+}
+.slate h1 {
+  color: var(--white);
+  font-size: clamp(38px, 7vw, 112px);
+  line-height: 1.02;
+  letter-spacing: -.035em;
+  font-weight: 650;
+  text-wrap: balance;
+}
+.slate-tagline {
+  margin-top: clamp(12px, 2vh, 22px);
+  color: var(--gray);
+  font-size: clamp(16px, 1.9vw, 28px);
+  letter-spacing: -.01em;
+  text-wrap: balance;
+}
+.slate-tagline:empty { display: none; }
+.slate-url {
+  margin-top: clamp(14px, 3vh, 30px);
+  font-family: var(--mono);
+  font-size: clamp(12px, 1.1vw, 17px);
+  color: var(--dim);
+  letter-spacing: .04em;
+}
+.slate-url:empty { display: none; }
+.slate.error h1 { font-size: clamp(28px, 4vw, 56px); }
+.slate.error .slate-tagline { color: #FF5A4E; }
+.slate-foot {
+  position: absolute;
+  bottom: clamp(20px, 4vh, 44px);
+  left: 0; right: 0;
+  text-align: center;
+  color: var(--dim);
+  font-size: clamp(11px, 1vw, 15px);
+  letter-spacing: .18em;
+  text-transform: uppercase;
+}
+.slate-foot:empty { display: none; }
+
+/* ---------- recording light ---------- */
+.rec {
+  position: absolute;
+  top: 18px; right: 22px;
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 5px 10px 5px 8px;
+  border-radius: 999px;
+  background: rgba(14, 14, 16, .7);
+  border: 1px solid rgba(255, 255, 255, .12);
+  color: var(--white);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: .18em;
+  z-index: 9;
+}
+.rec i { width: 8px; height: 8px; border-radius: 50%; background: #FF3B30; animation: blink 1.4s ease-in-out infinite; }
+@keyframes blink { 50% { opacity: .25; } }
+
+/* ---------- blackout ---------- */
+.black { position: absolute; inset: 0; background: #000; z-index: 8; animation: slate-in .25s; }
+
+/* ---------- key hint ---------- */
+.hint {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 18px;
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: rgba(14, 14, 16, .86);
+  border: 1px solid rgba(255, 255, 255, .12);
+  color: var(--gray);
+  font-size: 12px;
+  white-space: nowrap;
+  z-index: 9;
+  transition: opacity .5s, transform .5s var(--e);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+.hint.off { opacity: 0; transform: translate(-50%, 14px); pointer-events: none; }
+.hint kbd {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--white);
+  background: rgba(255, 255, 255, .1);
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 5px;
+  padding: 2px 6px;
+  margin-right: 5px;
+}
+.hint kbd + kbd { margin-left: -2px; }
